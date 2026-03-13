@@ -117,9 +117,7 @@ jobs:
           for i in {1..30}; do
             curl -sf http://localhost:${{ inputs.target_port }} > /dev/null 2>&1 && echo "App lista" && break
             sleep 5
-          done
-
-      - name: Run ZAP Baseline
+       - name: Run ZAP Baseline
         run: |
           mkdir -p reports
           chmod 777 reports
@@ -129,7 +127,7 @@ jobs:
             -v $(pwd)/reports:/zap/wrk:rw \
             -u root \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://$HOST_IP:3000 \
+            zap-baseline.py -t http://$HOST_IP:${{ inputs.target_port }} \
             -J zap_report.json \
             -r /tmp/zap_report.html \
             -l WARN -I || true
@@ -143,7 +141,6 @@ jobs:
           name: zap-report
           path: |
             reports/zap_report.json
-            reports/zap_report.html
 
   pentest-nuclei:
     name: Pentesting – Nuclei
