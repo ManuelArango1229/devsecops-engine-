@@ -117,23 +117,30 @@ jobs:
           for i in {1..30}; do
             curl -sf http://localhost:${{ inputs.target_port }} > /dev/null 2>&1 && echo "App lista" && break
             sleep 5
-       - name: Run ZAP Baseline
+          done
+
+      - name: Run ZAP Baseline
         run: |
           mkdir -p reports
-          chmod 777 reports
+          chmod -R 777 reports
+
           HOST_IP=$(ip route show default | awk '/default/ {print $3}')
           echo "Host IP: $HOST_IP"
+
           docker run --rm \
             -v $(pwd)/reports:/zap/wrk:rw \
             -u root \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://$HOST_IP:${{ inputs.target_port }} \
-            -J zap_report.json \
-            -r /tmp/zap_report.html \
+            zap-baseline.py \
+            -t http://$HOST_IP:${{ inputs.target_port }} \
+            -J /zap/wrk/zap_report.json \
+            -r /zap/wrk/zap_report.html \
             -l WARN -I || true
+
           if [ ! -f reports/zap_report.json ]; then
             echo '{"site":[{"alerts":[]}],"@version":"2.14.0"}' > reports/zap_report.json
           fi
+
           echo "ZAP done"
 
       - uses: actions/upload-artifact@v4
