@@ -6,7 +6,7 @@ Pipeline reutilizable de seguridad con evaluación asistida por IA.
 ```yaml
 jobs:
   security:
-    uses: TU_USUARIO/devsecops-engine/.github/workflows/reusable-devsecops.yml@main
+    uses: ManuelArango1229/devsecops-engine/.github/workflows/reusable-devsecops.yml@main
     with:
       target_image: 'mi-imagen:latest'
       target_port: '8080'
