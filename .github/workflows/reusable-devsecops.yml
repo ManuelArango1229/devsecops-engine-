@@ -131,7 +131,9 @@ jobs:
             -u root \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py -t http://$HOST_IP:${{ inputs.target_port }} \
-            -J zap_report.json -l WARN -I || true
+            -J zap_report.json \
+            -r /tmp/zap_report.html \
+            -l WARN -I || true
           if [ ! -f reports/zap_report.json ]; then
             echo '{"site":[{"alerts":[]}],"@version":"2.14.0"}' > reports/zap_report.json
           fi
