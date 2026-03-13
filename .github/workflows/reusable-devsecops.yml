@@ -123,14 +123,13 @@ jobs:
         run: |
           mkdir -p reports
           chmod 777 reports
-          chmod 777 $(pwd)/reports
           HOST_IP=$(ip route show default | awk '/default/ {print $3}')
           echo "Host IP: $HOST_IP"
           docker run --rm \
             -v $(pwd)/reports:/zap/wrk:rw \
             -u root \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://$HOST_IP:${{ inputs.target_port }} \
+            zap-baseline.py -t http://$HOST_IP:3000 \
             -J zap_report.json \
             -r /tmp/zap_report.html \
             -l WARN -I || true
