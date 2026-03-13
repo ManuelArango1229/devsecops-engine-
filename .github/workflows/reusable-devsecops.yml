@@ -1,0 +1,267 @@
+name: Reusable DevSecOps Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_image:
+        description: 'Imagen Docker del target (ej: bkimminich/juice-shop)'
+        required: true
+        type: string
+      target_port:
+        description: 'Puerto donde corre la app (ej: 3000)'
+        required: true
+        type: string
+      service_name:
+        description: 'Nombre del servicio para el reporte'
+        required: true
+        type: string
+      criticality:
+        description: 'Criticidad del negocio: high, medium, low'
+        required: false
+        type: string
+        default: 'medium'
+      environment:
+        description: 'Entorno: staging, pre-prod'
+        required: false
+        type: string
+        default: 'staging'
+      build_context:
+        description: 'Carpeta del Dockerfile si se construye local (opcional)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: false
+
+jobs:
+
+  sast-semgrep:
+    name: SAST – Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep
+        run: |
+          mkdir -p reports
+          semgrep --config auto --json --output reports/semgrep_report.json --no-error . || true
+          if [ ! -f reports/semgrep_report.json ] || [ ! -s reports/semgrep_report.json ]; then
+            echo '{"results": [], "errors": [], "version": "1.0"}' > reports/semgrep_report.json
+          fi
+          echo "Semgrep done: $(cat reports/semgrep_report.json | python3 -c "import json,sys;d=json.load(sys.stdin);print(len(d.get('results',[])))" 2>/dev/null || echo 0) findings"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: reports/semgrep_report.json
+
+  sca-trivy:
+    name: SCA – Trivy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
+
+      - name: Build image if local
+        if: ${{ inputs.build_context != '' }}
+        run: docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+
+      - name: Pull image if remote
+        if: ${{ inputs.build_context == '' }}
+        run: docker pull ${{ inputs.target_image }} || true
+
+      - name: Run Trivy
+        run: |
+          mkdir -p reports
+          trivy image --format json --output reports/trivy_report.json \
+            --severity CRITICAL,HIGH,MEDIUM --no-progress \
+            ${{ inputs.target_image }} || true
+          echo "Trivy done"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: reports/trivy_report.json
+
+  dast-zap:
+    name: DAST – OWASP ZAP
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image if local
+        if: ${{ inputs.build_context != '' }}
+        run: docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+
+      - name: Start target app
+        run: |
+          docker run -d --name target-app \
+            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
+            ${{ inputs.target_image }}
+          echo "Esperando app..."
+          for i in {1..30}; do
+            curl -sf http://localhost:${{ inputs.target_port }} > /dev/null 2>&1 && echo "App lista" && break
+            sleep 5
+          done
+
+      - name: Run ZAP Baseline
+        run: |
+          mkdir -p reports
+          chmod 777 reports
+          HOST_IP=$(ip route show default | awk '/default/ {print $3}')
+          docker run --rm \
+            -v $(pwd)/reports:/zap/wrk:rw \
+            -u root \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://$HOST_IP:${{ inputs.target_port }} \
+            -J zap_report.json -r zap_report.html -l WARN -I || true
+          if [ ! -f reports/zap_report.json ]; then
+            echo '{"site":[{"alerts":[]}],"@version":"2.14.0"}' > reports/zap_report.json
+          fi
+          echo "ZAP done"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            reports/zap_report.json
+            reports/zap_report.html
+
+  pentest-nuclei:
+    name: Pentesting – Nuclei
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image if local
+        if: ${{ inputs.build_context != '' }}
+        run: docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+
+      - name: Start target app
+        run: |
+          docker run -d --name target-app \
+            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
+            ${{ inputs.target_image }}
+          echo "Esperando app..."
+          for i in {1..30}; do
+            curl -sf http://localhost:${{ inputs.target_port }} > /dev/null 2>&1 && echo "App lista" && break
+            sleep 5
+          done
+
+      - name: Install and Run Nuclei
+        run: |
+          sudo apt-get install -y golang-go
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          ~/go/bin/nuclei -update-templates -silent || true
+          mkdir -p reports
+          HOST_IP=$(ip route show default | awk '/default/ {print $3}')
+          ~/go/bin/nuclei \
+            -u http://$HOST_IP:${{ inputs.target_port }} \
+            -automatic-scan \
+            -json-export reports/nuclei_report.json \
+            -severity low,medium,high,critical \
+            -timeout 30 -silent || true
+          if [ ! -f reports/nuclei_report.json ]; then
+            echo '[]' > reports/nuclei_report.json
+          fi
+          echo "Nuclei done: $(wc -l < reports/nuclei_report.json) findings"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-report
+          path: reports/nuclei_report.json
+
+  ai-evaluation:
+    name: Evaluacion IA + Security Gate
+    runs-on: ubuntu-latest
+    needs: [sast-semgrep, sca-trivy, dast-zap, pentest-nuclei]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: pip install openai anthropic requests python-dotenv
+
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          path: reports/
+
+      - name: Flatten reports
+        run: |
+          find reports/ -name "*.json" -exec cp {} reports/ \; 2>/dev/null || true
+
+      - name: Normalize findings
+        run: |
+          python3 scripts/normalizer.py \
+            --semgrep reports/semgrep_report.json \
+            --trivy reports/trivy_report.json \
+            --zap reports/zap_report.json \
+            --nuclei reports/nuclei_report.json \
+            --output reports/findings.json
+
+      - name: AI Evaluation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python3 scripts/ai_engine.py \
+            --findings reports/findings.json \
+            --output reports/ai_evaluation.json \
+            --service "${{ inputs.service_name }}" \
+            --criticality "${{ inputs.criticality }}" \
+            --environment "${{ inputs.environment }}"
+
+      - name: Security Gate
+        run: |
+          python3 scripts/gate.py \
+            --findings reports/findings.json \
+            --ai-evaluation reports/ai_evaluation.json \
+            --output reports/gate_decision.json
+
+      - name: Generate Report
+        run: |
+          python3 scripts/report_generator.py \
+            --findings reports/findings.json \
+            --ai-evaluation reports/ai_evaluation.json \
+            --gate-decision reports/gate_decision.json \
+            --output reports/SECURITY_REPORT.md
+
+      - name: Upload final artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: devsecops-final-report
+          path: |
+            reports/findings.json
+            reports/ai_evaluation.json
+            reports/gate_decision.json
+            reports/SECURITY_REPORT.md
+          retention-days: 30
+
+      - name: Enforce gate decision
+        run: |
+          python3 scripts/gate.py \
+            --findings reports/findings.json \
+            --ai-evaluation reports/ai_evaluation.json \
+            --output reports/gate_decision.json \
+            --enforce

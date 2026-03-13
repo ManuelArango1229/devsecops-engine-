@@ -1,0 +1,24 @@
+{
+  "policy_version": "1.0",
+  "environment": "staging",
+  "service": "juice-shop",
+  "business_criticality": "high",
+  "thresholds": {
+    "traditional_gate": {
+      "fail_on_critical": true,
+      "fail_on_high_count": 5,
+      "fail_on_medium_count": 20
+    },
+    "ai_gate": {
+      "enabled": true,
+      "model": "gpt-4o-mini",
+      "confidence_threshold": 0.7
+    }
+  },
+  "scanners": {
+    "semgrep": { "enabled": true, "type": "SAST", "ruleset": "auto" },
+    "trivy": { "enabled": true, "type": "SCA", "severity_filter": ["CRITICAL", "HIGH", "MEDIUM"] },
+    "zap": { "enabled": true, "type": "DAST", "scan_type": "baseline" },
+    "nuclei": { "enabled": true, "type": "PENTEST", "templates": ["exposures", "misconfiguration"] }
+  }
+}
