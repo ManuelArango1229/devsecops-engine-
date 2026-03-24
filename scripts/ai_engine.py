@@ -241,6 +241,64 @@ def call_anthropic(prompt: str, system_prompt: str) -> Optional[dict]:
         return None
 
 
+def call_groq(prompt: str, system_prompt: str) -> Optional[dict]:
+    """Llama a la API de Groq (compatible con OpenAI SDK)."""
+    try:
+        from openai import OpenAI
+        
+        api_key = os.environ.get('GROQ_API_KEY')
+        if not api_key:
+            print("  ⚠️  GROQ_API_KEY no configurada")
+            return None
+        
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1"
+        )
+        
+        print("  → Llamando a Groq deepseek-r1-distill-llama-70b...")
+        
+        response = client.chat.completions.create(
+            model="deepseek-r1-distill-llama-70b",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=2000
+        )
+        
+        content = response.choices[0].message.content.strip()
+        
+        # DeepSeek R1 incluye bloque <think>...</think>, hay que limpiarlo
+        if "<think>" in content:
+            content = content.split("</think>")[-1].strip()
+        
+        # Limpiar markdown fences si las hay
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        
+        result = json.loads(content.strip())
+        
+        return {
+            "provider": "groq",
+            "model": "deepseek-r1-distill-llama-70b",
+            "tokens_used": {
+                "prompt": response.usage.prompt_tokens,
+                "completion": response.usage.completion_tokens,
+                "total": response.usage.total_tokens
+            },
+            "evaluation": result
+        }
+        
+    except Exception as e:
+        print(f"  ❌ Error Groq: {e}")
+        return None
+
 def fallback_evaluation(findings_data: dict) -> dict:
     """
     Evaluación de respaldo cuando no hay API disponible.
@@ -331,16 +389,14 @@ def evaluate(findings_path: str, output_path: str, service: str,
     # Intentar APIs en orden de preferencia
     ai_result = None
     
-    if os.environ.get('OPENAI_API_KEY'):
+    if os.environ.get('GROQ_API_KEY'):
+        ai_result = call_groq(prompt, SYSTEM_PROMPT)
+
+    if not ai_result and os.environ.get('OPENAI_API_KEY'):
         ai_result = call_openai(prompt, SYSTEM_PROMPT)
-    
+
     if not ai_result and os.environ.get('ANTHROPIC_API_KEY'):
         ai_result = call_anthropic(prompt, SYSTEM_PROMPT)
-    
-    # Fallback si no hay API
-    if not ai_result:
-        ai_result = fallback_evaluation(findings_data)
-    
     # Construir output completo
     output = {
         "schema_version": "1.0",
