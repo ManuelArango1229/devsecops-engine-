@@ -7,7 +7,7 @@ Propósito académico: Demostrar cómo un LLM puede analizar hallazgos
 de seguridad normalizados y generar una evaluación contextual que
 supere el análisis por umbrales estáticos.
 
-Soporta: OpenAI (GPT-4o-mini) y Anthropic (Claude Haiku)
+Soporta: Groq (LLaMA 3.3 70B), OpenAI (GPT-4o-mini) y Anthropic (Claude Haiku)
 """
 
 import json
@@ -103,17 +103,17 @@ CRITERIOS DE DECISIÓN:
 
 def build_prompt(findings_data: dict, service: str, criticality: str, environment: str) -> str:
     """Construye el prompt con los datos del findings.json."""
-    
+
     summary = findings_data.get('summary', {})
     findings = findings_data.get('findings', [])
     tools = findings_data.get('tools_executed', {})
-    
+
     # Filtrar solo críticos y altos para el prompt (limitar tokens)
     critical_and_high = [
-        f for f in findings 
+        f for f in findings
         if f.get('severity') in ['CRITICAL', 'HIGH']
     ][:15]  # Máximo 15 para no exceder tokens
-    
+
     # Simplificar los hallazgos para el prompt
     simplified_findings = []
     for f in critical_and_high:
@@ -124,10 +124,10 @@ def build_prompt(findings_data: dict, service: str, criticality: str, environmen
             "severity": f.get('severity'),
             "title": f.get('title'),
             "category": f.get('category'),
-            "description": f.get('description', '')[:200],  # Truncar descripción
+            "description": f.get('description', '')[:200],
             "location": f.get('location', {})
         })
-    
+
     return EVALUATION_PROMPT_TEMPLATE.format(
         service_name=service,
         business_criticality=criticality,
@@ -145,34 +145,91 @@ def build_prompt(findings_data: dict, service: str, criticality: str, environmen
 # CLIENTES DE API
 # ============================================================
 
+def call_groq(prompt: str, system_prompt: str) -> Optional[dict]:
+    """Llama a la API de Groq usando LLaMA 3.3 70B (gratis)."""
+    try:
+        from openai import OpenAI
+
+        api_key = os.environ.get('GROQ_API_KEY')
+        if not api_key:
+            print("  ⚠️  GROQ_API_KEY no configurada")
+            return None
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1"
+        )
+
+        print("  → Llamando a Groq llama-3.3-70b-versatile...")
+
+        # Groq: combinar system + user en un solo mensaje user para mayor compatibilidad
+        combined_prompt = f"{system_prompt}\n\n{prompt}"
+
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "user", "content": combined_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=2000
+        )
+
+        content = response.choices[0].message.content.strip()
+
+        # Limpiar markdown fences si las hay
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+
+        result = json.loads(content.strip())
+
+        return {
+            "provider": "groq",
+            "model": "llama-3.3-70b-versatile",
+            "tokens_used": {
+                "prompt": response.usage.prompt_tokens,
+                "completion": response.usage.completion_tokens,
+                "total": response.usage.total_tokens
+            },
+            "evaluation": result
+        }
+
+    except Exception as e:
+        print(f"  ❌ Error Groq: {e}")
+        return None
+
+
 def call_openai(prompt: str, system_prompt: str) -> Optional[dict]:
     """Llama a la API de OpenAI."""
     try:
         from openai import OpenAI
-        
+
         api_key = os.environ.get('OPENAI_API_KEY')
         if not api_key:
             print("  ⚠️  OPENAI_API_KEY no configurada")
             return None
-        
+
         client = OpenAI(api_key=api_key)
-        
+
         print("  → Llamando a OpenAI GPT-4o-mini...")
-        
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,  # Baja temperatura para respuestas más consistentes
+            temperature=0.1,
             max_tokens=2000,
-            response_format={"type": "json_object"}  # Forzar respuesta JSON
+            response_format={"type": "json_object"}
         )
-        
+
         content = response.choices[0].message.content
         result = json.loads(content)
-        
+
         return {
             "provider": "openai",
             "model": "gpt-4o-mini",
@@ -183,7 +240,7 @@ def call_openai(prompt: str, system_prompt: str) -> Optional[dict]:
             },
             "evaluation": result
         }
-        
+
     except Exception as e:
         print(f"  ❌ Error OpenAI: {e}")
         return None
@@ -193,16 +250,16 @@ def call_anthropic(prompt: str, system_prompt: str) -> Optional[dict]:
     """Llama a la API de Anthropic (Claude)."""
     try:
         import anthropic
-        
+
         api_key = os.environ.get('ANTHROPIC_API_KEY')
         if not api_key:
             print("  ⚠️  ANTHROPIC_API_KEY no configurada")
             return None
-        
+
         client = anthropic.Anthropic(api_key=api_key)
-        
+
         print("  → Llamando a Anthropic Claude Haiku...")
-        
+
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2000,
@@ -211,20 +268,18 @@ def call_anthropic(prompt: str, system_prompt: str) -> Optional[dict]:
                 {"role": "user", "content": prompt}
             ]
         )
-        
-        content = message.content[0].text
-        
-        # Limpiar respuesta si tiene backticks
-        content = content.strip()
+
+        content = message.content[0].text.strip()
+
         if content.startswith('```json'):
             content = content[7:]
         if content.startswith('```'):
             content = content[3:]
         if content.endswith('```'):
             content = content[:-3]
-        
+
         result = json.loads(content.strip())
-        
+
         return {
             "provider": "anthropic",
             "model": "claude-haiku-4-5-20251001",
@@ -235,69 +290,11 @@ def call_anthropic(prompt: str, system_prompt: str) -> Optional[dict]:
             },
             "evaluation": result
         }
-        
+
     except Exception as e:
         print(f"  ❌ Error Anthropic: {e}")
         return None
 
-
-def call_groq(prompt: str, system_prompt: str) -> Optional[dict]:
-    """Llama a la API de Groq (compatible con OpenAI SDK)."""
-    try:
-        from openai import OpenAI
-        
-        api_key = os.environ.get('GROQ_API_KEY')
-        if not api_key:
-            print("  ⚠️  GROQ_API_KEY no configurada")
-            return None
-        
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1"
-        )
-        
-        print("  → Llamando a Groq deepseek-r1-distill-llama-70b...")
-        
-        response = client.chat.completions.create(
-            model="deepseek-r1-distill-llama-70b",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=2000
-        )
-        
-        content = response.choices[0].message.content.strip()
-        
-        # DeepSeek R1 incluye bloque <think>...</think>, hay que limpiarlo
-        if "<think>" in content:
-            content = content.split("</think>")[-1].strip()
-        
-        # Limpiar markdown fences si las hay
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        
-        result = json.loads(content.strip())
-        
-        return {
-            "provider": "groq",
-            "model": "deepseek-r1-distill-llama-70b",
-            "tokens_used": {
-                "prompt": response.usage.prompt_tokens,
-                "completion": response.usage.completion_tokens,
-                "total": response.usage.total_tokens
-            },
-            "evaluation": result
-        }
-        
-    except Exception as e:
-        print(f"  ❌ Error Groq: {e}")
-        return None
 
 def fallback_evaluation(findings_data: dict) -> dict:
     """
@@ -306,15 +303,14 @@ def fallback_evaluation(findings_data: dict) -> dict:
     NOTA: Este es el método TRADICIONAL que la IA debe superar.
     """
     print("  ⚠️  Usando evaluación de respaldo (sin IA)")
-    
+
     summary = findings_data.get('summary', {})
     by_severity = summary.get('by_severity', {})
-    
+
     critical = by_severity.get('CRITICAL', 0)
     high = by_severity.get('HIGH', 0)
     medium = by_severity.get('MEDIUM', 0)
-    
-    # Lógica simple de threshold
+
     if critical > 0:
         decision = "FAIL"
         risk_level = "CRITICAL"
@@ -331,7 +327,7 @@ def fallback_evaluation(findings_data: dict) -> dict:
         decision = "PASS"
         risk_level = "LOW"
         reasoning = "Sin hallazgos críticos o altos significativos."
-    
+
     return {
         "provider": "fallback_static",
         "model": "threshold_rules_v1",
@@ -355,7 +351,7 @@ def fallback_evaluation(findings_data: dict) -> dict:
             "false_positive_estimate": "media",
             "owasp_top10_present": [],
             "deploy_recommendation": "Revisar manualmente los hallazgos antes de proceder.",
-            "_note": "Esta evaluación NO usa IA. Configura OPENAI_API_KEY para evaluación completa."
+            "_note": "Esta evaluación NO usa IA. Configura GROQ_API_KEY para evaluación completa."
         }
     }
 
@@ -364,31 +360,41 @@ def fallback_evaluation(findings_data: dict) -> dict:
 # FUNCIÓN PRINCIPAL
 # ============================================================
 
-def evaluate(findings_path: str, output_path: str, service: str, 
+def evaluate(findings_path: str, output_path: str, service: str,
              criticality: str, environment: str):
     """Función principal de evaluación con IA."""
-    
+
     print("\n" + "="*60)
     print("  MOTOR DE EVALUACIÓN IA – DevSecOps TG")
     print("="*60)
-    
+
     # Cargar findings normalizados
     with open(findings_path, 'r') as f:
         findings_data = json.load(f)
-    
+
     total = findings_data.get('summary', {}).get('total', 0)
     print(f"  Hallazgos a evaluar: {total}")
     print(f"  Servicio: {service} | Criticidad: {criticality}")
     print()
-    
+
+    # DEBUG: verificar que los secrets llegan
+    groq_key = os.environ.get('GROQ_API_KEY', '')
+    openai_key = os.environ.get('OPENAI_API_KEY', '')
+    print(f"  🔑 GROQ_API_KEY   : {'configurada ✅' if groq_key else 'NO configurada ❌'}")
+    print(f"  🔑 OPENAI_API_KEY : {'configurada ✅' if openai_key else 'NO configurada ❌'}")
+    print()
+
     # Construir prompt
     prompt = build_prompt(findings_data, service, criticality, environment)
-    
+
     print("🤖 Invocando evaluación IA:")
-    
-    # Intentar APIs en orden de preferencia
+
+    # ============================================================
+    # ORDEN DE PREFERENCIA: Groq → OpenAI → Anthropic → Fallback
+    # FIX: el fallback ahora se llama correctamente SOLO si todo falla
+    # ============================================================
     ai_result = None
-    
+
     if os.environ.get('GROQ_API_KEY'):
         ai_result = call_groq(prompt, SYSTEM_PROMPT)
 
@@ -397,6 +403,11 @@ def evaluate(findings_path: str, output_path: str, service: str,
 
     if not ai_result and os.environ.get('ANTHROPIC_API_KEY'):
         ai_result = call_anthropic(prompt, SYSTEM_PROMPT)
+
+    # FIX CRÍTICO: fallback solo si ningún proveedor funcionó
+    if not ai_result:
+        ai_result = fallback_evaluation(findings_data)
+
     # Construir output completo
     output = {
         "schema_version": "1.0",
@@ -412,17 +423,17 @@ def evaluate(findings_path: str, output_path: str, service: str,
         "prompt_version": "1.0",
         "_academic_note": "Evaluación generada por LLM para demostración académica. Requiere validación humana."
     }
-    
+
     # Guardar
     with open(output_path, 'w') as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
-    
+
     # Mostrar resultado
     evaluation = output.get('evaluation', {})
     decision = evaluation.get('decision', 'UNKNOWN')
     confidence = evaluation.get('confidence', 0)
     risk_level = evaluation.get('risk_level', 'UNKNOWN')
-    
+
     print()
     print("="*60)
     print("  RESULTADO DE EVALUACIÓN IA")
@@ -445,9 +456,9 @@ if __name__ == "__main__":
     parser.add_argument('--service', default='unknown', help='Nombre del servicio')
     parser.add_argument('--criticality', default='medium', help='Criticidad del negocio')
     parser.add_argument('--environment', default='staging', help='Entorno de despliegue')
-    
+
     args = parser.parse_args()
-    
+
     evaluate(
         findings_path=args.findings,
         output_path=args.output,
