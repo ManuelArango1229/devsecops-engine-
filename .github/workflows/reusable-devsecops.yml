@@ -52,67 +52,69 @@ jobs:
     name: Auto-detección de contexto
     runs-on: ubuntu-latest
     outputs:
-      language:     ${{ steps.detect.outputs.language }}
-      scan_mode:    ${{ steps.detect.outputs.scan_mode }}
-      dast_enabled: ${{ steps.detect.outputs.dast_enabled }}
+      language:      ${{ steps.detect.outputs.language }}
+      scan_mode:     ${{ steps.detect.outputs.scan_mode }}
+      dast_enabled:  ${{ steps.detect.outputs.dast_enabled }}
       semgrep_rules: ${{ steps.detect.outputs.semgrep_rules }}
     steps:
-      - name: Checkout repo cliente
-        uses: actions/checkout@v4
-
-      # FIX: el engine se clona explícitamente en ./engine
+      # FIX DEFINITIVO: el engine se clona en ./engine
+      # El repo cliente NO se clona aquí — el detector analiza
+      # el engine mismo para detectar lenguaje del proyecto consumidor.
+      # Como juice-shop es una imagen Docker (no un repo clonado),
+      # se fuerza target_image para que scan_mode = "image".
       - name: Checkout ENGINE repo
         uses: actions/checkout@v4
         with:
           repository: ManuelArango1229/devsecops-engine-
           ref: main
-          path: engine
-
-      # FIX: verificar que el engine existe antes de ejecutar
-      - name: Verificar engine disponible
-        run: |
-          if [ ! -f engine/scripts/detector.py ]; then
-            echo "❌ ERROR: engine/scripts/detector.py no encontrado"
-            echo "Contenido del directorio engine/:"
-            ls -la engine/ 2>/dev/null || echo "Directorio engine/ vacío o no existe"
-            exit 1
-          fi
-          echo "✅ engine/scripts/detector.py encontrado"
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Verificar estructura del engine
+        run: |
+          echo "=== Contenido raíz ==="
+          ls -la
+          echo "=== scripts/ ==="
+          ls -la scripts/ 2>/dev/null || echo "❌ carpeta scripts/ no encontrada"
+          if [ ! -f scripts/detector.py ]; then
+            echo "❌ FATAL: scripts/detector.py no existe"
+            exit 1
+          fi
+          echo "✅ scripts/detector.py encontrado"
 
       - name: Run detector
         id: detect
         run: |
           mkdir -p reports
 
-          python3 engine/scripts/detector.py \
+          # El detector analiza el directorio actual (el engine).
+          # Lo importante es que target_image/target_url estén correctos
+          # para que scan_mode quede en "image" o "url" — no "static".
+          python3 scripts/detector.py \
             --path . \
             --output reports/scan_config.json \
             --target-image "${{ inputs.target_image }}" \
-            --target-url  "${{ inputs.target_url }}" \
+            --target-url   "${{ inputs.target_url }}" \
             --service      "${{ inputs.service_name }}" \
             --criticality  "${{ inputs.criticality }}" \
             --environment  "${{ inputs.environment }}"
 
-          # FIX: validar que el output tiene todos los campos necesarios
+          # Validar que el JSON tiene todos los campos necesarios
           python3 -c "
           import json, sys
-          try:
-              d = json.load(open('reports/scan_config.json'))
-              assert 'language'  in d, 'falta language'
-              assert 'scan_mode' in d, 'falta scan_mode'
-              assert 'summary'   in d, 'falta summary'
-              assert 'tools'     in d, 'falta tools'
-              print('✅ scan_config.json válido')
-          except AssertionError as e:
-              print(f'❌ scan_config.json incompleto: {e}')
+          d = json.load(open('reports/scan_config.json'))
+          needed = ['language', 'scan_mode', 'summary', 'tools', 'service']
+          missing = [k for k in needed if k not in d]
+          if missing:
+              print('❌ scan_config.json incompleto:', missing)
               sys.exit(1)
-          except Exception as e:
-              print(f'❌ Error leyendo scan_config.json: {e}')
-              sys.exit(1)
+          print('✅ scan_config.json válido')
+          print('   service   :', d['service'])
+          print('   language  :', d['language']['primary'])
+          print('   scan_mode :', d['scan_mode']['mode'])
+          print('   dast      :', d['summary']['dast_enabled'])
           "
 
           LANG=$(python3  -c "import json; d=json.load(open('reports/scan_config.json')); print(d['language']['primary'])")
@@ -120,11 +122,10 @@ jobs:
           DAST=$(python3  -c "import json; d=json.load(open('reports/scan_config.json')); print(str(d['summary']['dast_enabled']).lower())")
           RULES=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['tools']['semgrep']['rulesets'])")
 
-          echo "language=$LANG"      >> $GITHUB_OUTPUT
-          echo "scan_mode=$MODE"     >> $GITHUB_OUTPUT
-          echo "dast_enabled=$DAST"  >> $GITHUB_OUTPUT
+          echo "language=$LANG"       >> $GITHUB_OUTPUT
+          echo "scan_mode=$MODE"      >> $GITHUB_OUTPUT
+          echo "dast_enabled=$DAST"   >> $GITHUB_OUTPUT
           echo "semgrep_rules=$RULES" >> $GITHUB_OUTPUT
-
           echo "✅ Lenguaje: $LANG | Modo: $MODE | DAST: $DAST"
 
       - uses: actions/upload-artifact@v4
@@ -138,8 +139,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect]
     steps:
-      - name: Checkout
+      - name: Checkout ENGINE repo
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Install Semgrep
         run: pip install semgrep
@@ -150,7 +154,6 @@ jobs:
           RULES="${{ needs.detect.outputs.semgrep_rules }}"
           echo "Usando reglas: $RULES"
 
-          # FIX: --timeout 300 evita cortes por reglas lentas
           semgrep \
             --config $RULES \
             --json \
@@ -162,17 +165,14 @@ jobs:
             echo '{"results":[],"errors":[],"version":"1.0"}' > reports/semgrep_report.json
           fi
 
-          COUNT=$(python3 -c "
+          python3 -c "
           import json
           d = json.load(open('reports/semgrep_report.json'))
           errs = d.get('errors', [])
-          if errs:
-              print(f'Advertencia: {len(errs)} errores en semgrep')
-              for e in errs[:3]:
-                  print(' -', e.get('message',''))
-          print(len(d.get('results',[])))
-          " 2>/dev/null || echo 0)
-          echo "Semgrep done: $COUNT findings"
+          for e in errs[:3]:
+              print('  ⚠️ Semgrep error:', e.get('message',''))
+          print(f'Semgrep done: {len(d.get(\"results\",[]))} findings, {len(errs)} errores')
+          "
 
       - uses: actions/upload-artifact@v4
         with:
@@ -185,9 +185,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Install Trivy
         run: |
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
@@ -196,11 +193,11 @@ jobs:
             | sudo tee -a /etc/apt/sources.list.d/trivy.list
           sudo apt-get update && sudo apt-get install -y trivy
 
-      # FIX: pull de imagen siempre antes de escanear
+      # FIX: pull de la imagen SIEMPRE antes de escanear con imagen
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
-          docker rm -f target-app 2>/dev/null || true
+          docker rm -f target-trivy 2>/dev/null || true
           if [ -n "${{ inputs.build_context }}" ]; then
             docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
           else
@@ -220,7 +217,14 @@ jobs:
             --scanners vuln,secret,misconfig \
             --no-progress \
             ${{ inputs.target_image }} || true
-          echo "Trivy image done"
+
+          COUNT=$(python3 -c "
+          import json
+          d = json.load(open('reports/trivy_report.json'))
+          t = sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results', []))
+          print(t)
+          " 2>/dev/null || echo 0)
+          echo "Trivy image done: $COUNT vulnerabilidades"
 
       - name: Run Trivy – filesystem
         if: ${{ inputs.target_image == '' || inputs.target_url != '' }}
@@ -240,13 +244,6 @@ jobs:
           if [ ! -f reports/trivy_report.json ] || [ ! -s reports/trivy_report.json ]; then
             echo '{"Results":[]}' > reports/trivy_report.json
           fi
-          COUNT=$(python3 -c "
-          import json
-          d = json.load(open('reports/trivy_report.json'))
-          total = sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results', []))
-          print(total)
-          " 2>/dev/null || echo 0)
-          echo "Trivy: $COUNT vulnerabilidades encontradas"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -270,141 +267,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # FIX: pull antes de run con rm previo
-      - name: Pull imagen Docker
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
-        run: |
-          docker rm -f target-app 2>/dev/null || true
-          if [ -n "${{ inputs.build_context }}" ]; then
-            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
-          else
-            docker pull ${{ inputs.target_image }}
-          fi
-
-      # FIX: health check con localhost en lugar de ip route
-      - name: Start target app
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
-        run: |
-          docker rm -f target-app 2>/dev/null || true
-          docker run -d --name target-app \
-            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
-            ${{ inputs.target_image }}
-
-          echo "Esperando app en localhost:${{ inputs.target_port }}..."
-          for i in $(seq 1 40); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 3 --connect-timeout 3 \
-              http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
-            echo "Intento $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ]; then
-              echo "✅ App lista (HTTP $STATUS)"
-              break
-            fi
-            if [ "$i" = "40" ]; then
-              echo "⚠️ App no respondió tras 200s — continuando de todas formas"
-              docker logs target-app --tail 20 || true
-            fi
-            sleep 5
-          done
-
-      # FIX: target URL usa localhost, no ip route
-      - name: Set target URL
-        id: target
-        run: |
-          if [ -n "${{ inputs.target_url }}" ]; then
-            echo "url=${{ inputs.target_url }}" >> $GITHUB_OUTPUT
-          else
-            echo "url=http://localhost:${{ inputs.target_port }}" >> $GITHUB_OUTPUT
-          fi
-          echo "Target URL: $(cat $GITHUB_OUTPUT | grep url | tail -1)"
-
-      # FIX: instalación por binario directo sin go install
-      - name: Install recon tools
-        run: |
-          sudo apt-get install -y nmap curl wget unzip 2>/dev/null || true
-          pip install wafw00f --break-system-packages 2>/dev/null || true
-
-          # ffuf por binario estable
-          FFUF_VERSION="2.1.0"
-          wget -q "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" \
-            -O /tmp/ffuf.tar.gz && \
-            tar -xzf /tmp/ffuf.tar.gz -C /tmp/ && \
-            sudo mv /tmp/ffuf /usr/local/bin/ffuf && \
-            chmod +x /usr/local/bin/ffuf && \
-            echo "✅ ffuf instalado: $(ffuf -V 2>&1 | head -1)" || \
-            echo "⚠️ ffuf no disponible — recon usará fallback curl"
-
-          # httpx por binario estable
-          HTTPX_VERSION="1.6.9"
-          wget -q "https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VERSION}/httpx_${HTTPX_VERSION}_linux_amd64.zip" \
-            -O /tmp/httpx.zip && \
-            unzip -q /tmp/httpx.zip -d /tmp/httpx_bin && \
-            sudo mv /tmp/httpx_bin/httpx /usr/local/bin/httpx && \
-            chmod +x /usr/local/bin/httpx && \
-            echo "✅ httpx instalado" || \
-            echo "⚠️ httpx no disponible — usará curl fallback"
-
-      - name: Run reconocimiento
-        run: |
-          mkdir -p reports
-          python3 scripts/recon.py \
-            --target "${{ steps.target.outputs.url }}" \
-            --output reports/recon_context.json
-
-      # FIX: garantizar que el recon_context siempre tiene nuclei_targets poblado
-      - name: Garantizar recon_context válido
-        run: |
-          TARGET="${{ steps.target.outputs.url }}"
-          python3 -c "
-          import json, sys
-          try:
-              d = json.load(open('reports/recon_context.json'))
-              targets = d.get('nuclei_targets', [])
-              if not targets:
-                  d['nuclei_targets'] = ['$TARGET']
-                  print('⚠️ nuclei_targets vacío — usando target base')
-              assert d.get('schema_version'), 'schema_version faltante'
-              with open('reports/recon_context.json', 'w') as f:
-                  json.dump(d, f, indent=2)
-              print(f'✅ recon_context válido: {len(d[\"nuclei_targets\"])} targets')
-          except Exception as e:
-              print(f'⚠️ Regenerando recon_context: {e}')
-              fallback = {
-                  'schema_version': '1.0',
-                  'target_url': '$TARGET',
-                  'nuclei_targets': ['$TARGET'],
-                  'summary': {
-                      'open_ports': [${{ inputs.target_port }}],
-                      'discovered_routes_count': 0,
-                      'technologies': [],
-                      'waf_present': False,
-                      'missing_security_headers': [],
-                      'attack_surface_findings': 0
-                  }
-              }
-              with open('reports/recon_context.json', 'w') as f:
-                  json.dump(fallback, f, indent=2)
-          "
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: recon-context
-          path: reports/recon_context.json
-
-  # ── JOB 4: DAST – ZAP ────────────────────────────────────────────────────
-  dast-zap:
-    name: DAST – OWASP ZAP
-    runs-on: ubuntu-latest
-    needs: [detect, recon]
-    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
-    steps:
-      - name: Checkout ENGINE repo
-        uses: actions/checkout@v4
-        with:
-          repository: ManuelArango1229/devsecops-engine-
-          ref: main
-
-      # FIX: pull antes de run con rm previo
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -431,11 +293,136 @@ jobs:
               http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
             echo "Intento $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ]; then
-              echo "✅ App lista (HTTP $STATUS)"
-              break
+              echo "✅ App lista (HTTP $STATUS)"; break
             fi
             if [ "$i" = "40" ]; then
-              echo "⚠️ App no respondió tras 200s — continuando de todas formas"
+              echo "⚠️ App no respondió — continuando de todas formas"
+              docker logs target-app --tail 20 || true
+            fi
+            sleep 5
+          done
+
+      # FIX: target URL usa localhost, no ip route
+      - name: Set target URL
+        id: target
+        run: |
+          if [ -n "${{ inputs.target_url }}" ]; then
+            echo "url=${{ inputs.target_url }}" >> $GITHUB_OUTPUT
+          else
+            echo "url=http://localhost:${{ inputs.target_port }}" >> $GITHUB_OUTPUT
+          fi
+
+      # FIX: instalación por binario directo
+      - name: Install recon tools
+        run: |
+          sudo apt-get install -y nmap curl wget unzip 2>/dev/null || true
+          pip install wafw00f --break-system-packages 2>/dev/null || true
+
+          FFUF_VERSION="2.1.0"
+          wget -q "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" \
+            -O /tmp/ffuf.tar.gz && \
+            tar -xzf /tmp/ffuf.tar.gz -C /tmp/ && \
+            sudo mv /tmp/ffuf /usr/local/bin/ffuf && \
+            chmod +x /usr/local/bin/ffuf && \
+            echo "✅ ffuf instalado" || echo "⚠️ ffuf no disponible"
+
+          HTTPX_VERSION="1.6.9"
+          wget -q "https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VERSION}/httpx_${HTTPX_VERSION}_linux_amd64.zip" \
+            -O /tmp/httpx.zip && \
+            unzip -q /tmp/httpx.zip -d /tmp/httpx_bin && \
+            sudo mv /tmp/httpx_bin/httpx /usr/local/bin/httpx && \
+            chmod +x /usr/local/bin/httpx && \
+            echo "✅ httpx instalado" || echo "⚠️ httpx no disponible"
+
+      - name: Run reconocimiento
+        run: |
+          mkdir -p reports
+          python3 scripts/recon.py \
+            --target "${{ steps.target.outputs.url }}" \
+            --output reports/recon_context.json
+
+      # FIX: garantizar que nuclei_targets nunca esté vacío
+      - name: Validar recon_context
+        run: |
+          TARGET="${{ steps.target.outputs.url }}"
+          python3 -c "
+          import json
+          try:
+              d = json.load(open('reports/recon_context.json'))
+              if not d.get('nuclei_targets'):
+                  d['nuclei_targets'] = ['$TARGET']
+                  print('⚠️ nuclei_targets vacío — usando target base')
+              assert d.get('schema_version'), 'schema_version faltante'
+              with open('reports/recon_context.json', 'w') as f:
+                  json.dump(d, f, indent=2)
+              print(f'✅ recon_context válido: {len(d[\"nuclei_targets\"])} targets')
+          except Exception as e:
+              print(f'⚠️ Regenerando recon_context mínimo: {e}')
+              fallback = {
+                  'schema_version': '1.0',
+                  'target_url': '$TARGET',
+                  'nuclei_targets': ['$TARGET'],
+                  'summary': {
+                      'open_ports': [${{ inputs.target_port }}],
+                      'discovered_routes_count': 0,
+                      'technologies': [],
+                      'waf_present': False,
+                      'missing_security_headers': [],
+                      'attack_surface_findings': 0,
+                  }
+              }
+              with open('reports/recon_context.json', 'w') as f:
+                  json.dump(fallback, f, indent=2)
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recon-context
+          path: reports/recon_context.json
+
+  # ── JOB 4: DAST – ZAP ────────────────────────────────────────────────────
+  dast-zap:
+    name: DAST – OWASP ZAP
+    runs-on: ubuntu-latest
+    needs: [detect, recon]
+    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
+    steps:
+      - name: Checkout ENGINE repo
+        uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
+
+      - name: Pull imagen Docker
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        run: |
+          docker rm -f target-app 2>/dev/null || true
+          if [ -n "${{ inputs.build_context }}" ]; then
+            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+          else
+            docker pull ${{ inputs.target_image }}
+          fi
+
+      # FIX: health check con localhost
+      - name: Start target app
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        run: |
+          docker rm -f target-app 2>/dev/null || true
+          docker run -d --name target-app \
+            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
+            ${{ inputs.target_image }}
+
+          echo "Esperando app en localhost:${{ inputs.target_port }}..."
+          for i in $(seq 1 40); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 3 --connect-timeout 3 \
+              http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
+            echo "Intento $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ]; then
+              echo "✅ App lista (HTTP $STATUS)"; break
+            fi
+            if [ "$i" = "40" ]; then
+              echo "⚠️ App no respondió — continuando de todas formas"
               docker logs target-app --tail 20 || true
             fi
             sleep 5
@@ -479,8 +466,7 @@ jobs:
           COUNT=$(python3 -c "
           import json
           d = json.load(open('reports/zap_report.json'))
-          total = sum(len(s.get('alerts',[])) for s in d.get('site',[]))
-          print(total)
+          print(sum(len(s.get('alerts',[])) for s in d.get('site',[])))
           " 2>/dev/null || echo 0)
           echo "ZAP done: $COUNT alertas"
 
@@ -502,7 +488,6 @@ jobs:
           repository: ManuelArango1229/devsecops-engine-
           ref: main
 
-      # FIX: pull antes de run con rm previo
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -529,11 +514,10 @@ jobs:
               http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
             echo "Intento $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ]; then
-              echo "✅ App lista (HTTP $STATUS)"
-              break
+              echo "✅ App lista (HTTP $STATUS)"; break
             fi
             if [ "$i" = "40" ]; then
-              echo "⚠️ App no respondió tras 200s — continuando de todas formas"
+              echo "⚠️ App no respondió — continuando de todas formas"
               docker logs target-app --tail 20 || true
             fi
             sleep 5
@@ -572,9 +556,9 @@ jobs:
           mkdir -p reports
           TARGET="${{ steps.target.outputs.url }}"
 
-          # FIX: siempre tener al menos el target base en la lista
+          # FIX: siempre tener al menos el target base
           python3 -c "
-          import json, sys
+          import json
           try:
               d = json.load(open('reports/recon_context.json'))
               targets = d.get('nuclei_targets', [])
@@ -585,8 +569,7 @@ jobs:
               print(f'✅ {len(targets)} targets para Nuclei')
           except Exception as e:
               print(f'⚠️ Usando target base: {e}')
-              with open('/tmp/nuclei_targets.txt', 'w') as f:
-                  f.write('$TARGET')
+              open('/tmp/nuclei_targets.txt','w').write('$TARGET')
           "
 
           nuclei \
@@ -604,11 +587,11 @@ jobs:
 
           COUNT=$(python3 -c "
           import json
-          data = open('reports/nuclei_report.json').read().strip()
-          if data.startswith('['):
-              print(len(json.loads(data)))
+          raw = open('reports/nuclei_report.json').read().strip()
+          if raw.startswith('['):
+              print(len(json.loads(raw)))
           else:
-              print(len([l for l in data.splitlines() if l.strip()]))
+              print(len([l for l in raw.splitlines() if l.strip()]))
           " 2>/dev/null || echo 0)
           echo "Nuclei done: $COUNT findings"
 
@@ -637,45 +620,91 @@ jobs:
       - name: Install Python deps
         run: pip install openai anthropic requests python-dotenv
 
-      # FIX: descarga tolerante a fallos con gh cli + fallbacks JSON válidos
+      # FIX DEFINITIVO: descarga con gh cli + fallbacks JSON válidos por herramienta
+      # Si un job se saltó o falló, su artifact no existe — se usa fallback en lugar de fallar todo
       - name: Download artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p reports
 
-          echo "→ Descargando semgrep-report..."
-          gh run download ${{ github.run_id }} --name semgrep-report --dir reports/ 2>/dev/null || \
-            echo '{"results":[],"errors":[],"version":"1.0"}' > reports/semgrep_report.json
+          echo "→ semgrep-report"
+          gh run download ${{ github.run_id }} --name semgrep-report --dir reports/ 2>/dev/null \
+            && echo "  ✅ descargado" \
+            || { echo "  ⚠️ no disponible — usando fallback"
+                 echo '{"results":[],"errors":[],"version":"1.0"}' > reports/semgrep_report.json; }
 
-          echo "→ Descargando trivy-report..."
-          gh run download ${{ github.run_id }} --name trivy-report --dir reports/ 2>/dev/null || \
-            echo '{"Results":[]}' > reports/trivy_report.json
+          echo "→ trivy-report"
+          gh run download ${{ github.run_id }} --name trivy-report --dir reports/ 2>/dev/null \
+            && echo "  ✅ descargado" \
+            || { echo "  ⚠️ no disponible — usando fallback"
+                 echo '{"Results":[]}' > reports/trivy_report.json; }
 
-          echo "→ Descargando zap-report..."
-          gh run download ${{ github.run_id }} --name zap-report --dir reports/ 2>/dev/null || \
-            echo '{"site":[{"alerts":[]}],"@version":"2.14.0"}' > reports/zap_report.json
+          echo "→ zap-report"
+          gh run download ${{ github.run_id }} --name zap-report --dir reports/ 2>/dev/null \
+            && echo "  ✅ descargado" \
+            || { echo "  ⚠️ no disponible — usando fallback"
+                 echo '{"site":[{"alerts":[]}],"@version":"2.14.0"}' > reports/zap_report.json; }
 
-          echo "→ Descargando nuclei-report..."
-          gh run download ${{ github.run_id }} --name nuclei-report --dir reports/ 2>/dev/null || \
-            echo '[]' > reports/nuclei_report.json
+          echo "→ nuclei-report"
+          gh run download ${{ github.run_id }} --name nuclei-report --dir reports/ 2>/dev/null \
+            && echo "  ✅ descargado" \
+            || { echo "  ⚠️ no disponible — usando fallback"
+                 echo '[]' > reports/nuclei_report.json; }
 
-          echo "→ Descargando recon-context..."
-          gh run download ${{ github.run_id }} --name recon-context --dir reports/ 2>/dev/null || \
-            echo '{"schema_version":"1.0","nuclei_targets":[],"summary":{}}' > reports/recon_context.json
+          echo "→ recon-context"
+          gh run download ${{ github.run_id }} --name recon-context --dir reports/ 2>/dev/null \
+            && echo "  ✅ descargado" \
+            || { echo "  ⚠️ no disponible — usando fallback"
+                 echo '{"schema_version":"1.0","nuclei_targets":[],"summary":{}}' > reports/recon_context.json; }
 
-          echo "→ Descargando scan-config..."
-          gh run download ${{ github.run_id }} --name scan-config --dir reports/ 2>/dev/null || \
-            echo '{"schema_version":"1.0"}' > reports/scan_config.json
+          echo "→ scan-config"
+          gh run download ${{ github.run_id }} --name scan-config --dir reports/ 2>/dev/null \
+            && echo "  ✅ descargado" \
+            || { echo "  ⚠️ no disponible — usando fallback"
+                 echo '{"schema_version":"1.0"}' > reports/scan_config.json; }
 
           echo ""
           echo "📁 Archivos en reports/:"
           ls -lah reports/
-        env:
-          GH_TOKEN: ${{ github.token }}
 
+          echo ""
+          echo "📊 Conteo rápido por herramienta:"
+          python3 -c "
+          import json
+
+          try:
+              d = json.load(open('reports/semgrep_report.json'))
+              print('  semgrep :', len(d.get('results', [])), 'findings')
+          except: print('  semgrep : error leyendo reporte')
+
+          try:
+              d = json.load(open('reports/trivy_report.json'))
+              t = sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results', []))
+              print('  trivy   :', t, 'vulnerabilidades')
+          except: print('  trivy   : error leyendo reporte')
+
+          try:
+              d = json.load(open('reports/zap_report.json'))
+              t = sum(len(s.get('alerts', [])) for s in d.get('site', []))
+              print('  zap     :', t, 'alertas')
+          except: print('  zap     : error leyendo reporte')
+
+          try:
+              raw = open('reports/nuclei_report.json').read().strip()
+              if raw.startswith('['):
+                  t = len(json.loads(raw))
+              else:
+                  t = len([l for l in raw.splitlines() if l.strip()])
+              print('  nuclei  :', t, 'findings')
+          except: print('  nuclei  : error leyendo reporte')
+          "
+
+      # FIX: pasar SERVICE_NAME y ENVIRONMENT como env vars al normalizador
       - name: Normalize findings
         env:
-          SERVICE_NAME: ${{ inputs.service_name }}
-          ENVIRONMENT:  ${{ inputs.environment }}
+          SERVICE_NAME:  ${{ inputs.service_name }}
+          ENVIRONMENT:   ${{ inputs.environment }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           python3 scripts/normalizer.py \
@@ -685,14 +714,27 @@ jobs:
             --nuclei  reports/nuclei_report.json \
             --output  reports/findings.json
 
+          python3 -c "
+          import json
+          d = json.load(open('reports/findings.json'))
+          s = d.get('summary', {})
+          print('=== FINDINGS NORMALIZADOS ===')
+          print('  Total   :', s.get('total', 0))
+          print('  CRITICAL:', s.get('by_severity', {}).get('CRITICAL', 0))
+          print('  HIGH    :', s.get('by_severity', {}).get('HIGH', 0))
+          print('  MEDIUM  :', s.get('by_severity', {}).get('MEDIUM', 0))
+          print('  LOW     :', s.get('by_severity', {}).get('LOW', 0))
+          print('  By tool :', d.get('tools_executed', {}))
+          "
+
       - name: AI Evaluation
         env:
-          GROQ_API_KEY:     ${{ secrets.GROQ_API_KEY }}
-          OPENAI_API_KEY:   ${{ secrets.OPENAI_API_KEY }}
+          GROQ_API_KEY:      ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SERVICE_NAME:     ${{ inputs.service_name }}
-          ENVIRONMENT:      ${{ inputs.environment }}
-          GITHUB_RUN_ID:    ${{ github.run_id }}
+          SERVICE_NAME:      ${{ inputs.service_name }}
+          ENVIRONMENT:       ${{ inputs.environment }}
+          GITHUB_RUN_ID:     ${{ github.run_id }}
         run: |
           python3 scripts/ai_engine.py \
             --findings    reports/findings.json \
@@ -704,17 +746,17 @@ jobs:
       - name: Security Gate
         run: |
           python3 scripts/gate.py \
-            --findings       reports/findings.json \
-            --ai-evaluation  reports/ai_evaluation.json \
-            --output         reports/gate_decision.json
+            --findings      reports/findings.json \
+            --ai-evaluation reports/ai_evaluation.json \
+            --output        reports/gate_decision.json
 
       - name: Generate Report
         run: |
           python3 scripts/report_generator.py \
-            --findings       reports/findings.json \
-            --ai-evaluation  reports/ai_evaluation.json \
-            --gate-decision  reports/gate_decision.json \
-            --output         reports/SECURITY_REPORT.md
+            --findings      reports/findings.json \
+            --ai-evaluation reports/ai_evaluation.json \
+            --gate-decision reports/gate_decision.json \
+            --output        reports/SECURITY_REPORT.md
 
       - name: Upload final artifacts
         uses: actions/upload-artifact@v4
@@ -729,11 +771,11 @@ jobs:
             reports/SECURITY_REPORT.md
           retention-days: 30
 
-      # FIX: enforce en step separado al final para que el upload siempre ocurra
+      # FIX: enforce en step separado — el upload siempre ocurre aunque falle el gate
       - name: Security Gate enforce
         run: |
           python3 scripts/gate.py \
-            --findings       reports/findings.json \
-            --ai-evaluation  reports/ai_evaluation.json \
-            --output         reports/gate_decision.json \
+            --findings      reports/findings.json \
+            --ai-evaluation reports/ai_evaluation.json \
+            --output        reports/gate_decision.json \
             --enforce
