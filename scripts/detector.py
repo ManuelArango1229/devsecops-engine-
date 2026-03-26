@@ -19,12 +19,11 @@ LANGUAGE_MARKERS = {
     "php":     ["composer.json", "composer.lock", "artisan"],
 }
 
-# Solo rulesets válidos en Semgrep OSS 2025
 SEMGREP_RULESETS = {
-    "nodejs":  "p/nodejs p/javascript p/typescript p/jwt p/xss p/sql-injection p/secrets",
-    "python":  "p/python p/django p/flask p/bandit p/secrets",
-    "java":    "p/java p/spring p/secrets",
-    "go":      "p/golang p/gosec p/secrets",
+    "nodejs":  "p/nodejs p/javascript p/typescript p/secrets",
+    "python":  "p/python p/bandit p/secrets",
+    "java":    "p/java p/secrets",
+    "go":      "p/golang p/secrets",
     "dotnet":  "p/csharp p/secrets",
     "php":     "p/php p/secrets",
     "generic": "p/secrets",
