@@ -20,13 +20,13 @@ LANGUAGE_MARKERS = {
 }
 
 SEMGREP_RULESETS = {
-    "nodejs":  "p/nodejs p/javascript p/typescript p/secrets",
-    "python":  "p/python p/secrets",
-    "java":    "p/java p/secrets",
-    "go":      "p/golang p/secrets",
-    "dotnet":  "p/csharp p/secrets",
-    "php":     "p/php p/secrets",
-    "generic": "p/secrets",
+    "nodejs":  "p/nodejs p/javascript p/typescript",
+    "python":  "p/python",
+    "java":    "p/java",
+    "go":      "p/golang",
+    "dotnet":  "p/csharp",
+    "php":     "p/php",
+    "generic": "p/python",
 }
 
 API_SPEC_FILES = [

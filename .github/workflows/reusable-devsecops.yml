@@ -738,6 +738,7 @@ jobs:
             --findings      reports/findings.json \
             --ai-evaluation reports/ai_evaluation.json \
             --gate-decision reports/gate_decision.json \
+            --recon         reports/recon_context.json \
             --output        reports/SECURITY_REPORT.md
 
       - name: Upload final artifacts
