@@ -417,7 +417,7 @@ jobs:
               --max-time 3 --connect-timeout 3 \
               http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
             echo "Intento $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ]; then
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ] || [ "$STATUS" = "404" ]; then
               echo "✅ App lista (HTTP $STATUS)"; break
             fi
             if [ "$i" = "40" ]; then
