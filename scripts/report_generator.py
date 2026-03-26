@@ -12,8 +12,10 @@ from datetime import datetime
 SEVERITY_ICONS = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢", "INFO": "⚪"}
 DECISION_ICONS = {"PASS": "✅", "FAIL": "❌", "CONDITIONAL": "⚠️"}
 TOOL_NAMES = {
-    "semgrep": "Semgrep (SAST)", "trivy": "Trivy (SCA)",
-    "zap": "OWASP ZAP (DAST)", "nuclei": "Nuclei (Pentesting)"
+    "semgrep": "Semgrep (SAST)",
+    "trivy":   "Trivy (SCA)",
+    "zap":     "OWASP ZAP (DAST)",
+    "nuclei":  "Nuclei (Pentesting)",
 }
 COVERAGE_ICONS = {"buena": "✅", "parcial": "🟡", "ninguna": "❌"}
 
@@ -29,7 +31,7 @@ def format_severity_table(by_severity: dict) -> str:
 def format_tool_table(tools_data: dict) -> str:
     rows = []
     for tool, count in tools_data.items():
-        name = TOOL_NAMES.get(tool, tool)
+        name   = TOOL_NAMES.get(tool, tool)
         status = "✅ Ejecutado" if count > 0 else "⚠️ Sin hallazgos"
         rows.append(f"| {name} | {count} | {status} |")
     return "\n".join(rows)
@@ -40,11 +42,11 @@ def format_key_findings_table(key_findings: list) -> str:
         return "_No se identificaron hallazgos principales._\n"
     rows = []
     for f in key_findings:
-        icon = SEVERITY_ICONS.get(f.get('severity'), '⚪')
-        sev = f.get('severity', '?')
-        title = f.get('title', 'Unknown')[:45]
-        cat = f.get('category', 'N/A')[:35]
-        cvss = f.get('cvss_score', 'N/A')
+        icon    = SEVERITY_ICONS.get(f.get('severity'), '⚪')
+        sev     = f.get('severity', '?')
+        title   = f.get('title', 'Unknown')[:45]
+        cat     = f.get('category', 'N/A')[:35]
+        cvss    = f.get('cvss_score', 'N/A')
         exploit = "🔴 Sí" if f.get('remote_exploitable') else "🟢 No"
         rows.append(f"| {icon} {sev} | {title} | {cvss} | {exploit} | {cat} |")
     header = "| Severidad | Hallazgo | CVSS | Remoto | Categoría OWASP |\n|---|---|---|---|---|"
@@ -54,13 +56,11 @@ def format_key_findings_table(key_findings: list) -> str:
 def format_attack_chains(attack_chains: list) -> str:
     if not attack_chains:
         return "_No se identificaron cadenas de ataque combinadas._\n"
-
     md = ""
     for chain in attack_chains:
         icon = SEVERITY_ICONS.get(chain.get('severity'), '⚪')
         likelihood_map = {"alta": "🔴 Alta", "media": "🟠 Media", "baja": "🟢 Baja"}
         likelihood = likelihood_map.get(chain.get('likelihood', ''), chain.get('likelihood', 'N/A'))
-
         md += f"#### {icon} {chain.get('chain_id', 'CHAIN')} – {chain.get('title', 'Sin título')}\n\n"
         md += f"- **Severidad combinada:** {chain.get('severity', 'N/A')}\n"
         md += f"- **Probabilidad:** {likelihood}\n"
@@ -75,46 +75,40 @@ def format_attack_chains(attack_chains: list) -> str:
 def format_remediation_roadmap(remediation: list) -> str:
     if not remediation:
         return "_No se identificaron prioridades específicas._\n"
-
     immediate = [r for r in remediation if r.get('timeline') == 'inmediato']
-    short = [r for r in remediation if r.get('timeline') == 'corto plazo']
-    long_ = [r for r in remediation if r.get('timeline') == 'largo plazo']
-
+    short      = [r for r in remediation if r.get('timeline') == 'corto plazo']
+    long_      = [r for r in remediation if r.get('timeline') == 'largo plazo']
     md = ""
-
     if immediate:
         md += "### 🚨 Inmediato (0–7 días)\n\n"
         for r in immediate:
-            fix = f" → Fix: `{r.get('fix_version')}`" if r.get('fix_version') else ""
+            fix    = f" → Fix: `{r.get('fix_version')}`" if r.get('fix_version') else ""
             effort = r.get('effort', 'N/A')
             md += f"**{r.get('priority', '?')}.** {r.get('action', 'N/A')}{fix}\n"
             md += f"   - Herramienta: `{r.get('tool', 'N/A')}` | Esfuerzo: _{effort}_ | Fix disponible: {'✅' if r.get('fix_available') else '❌'}\n\n"
-
     if short:
         md += "### ⚡ Corto plazo (1–4 semanas)\n\n"
         for r in short:
             fix = f" → Fix: `{r.get('fix_version')}`" if r.get('fix_version') else ""
             md += f"**{r.get('priority', '?')}.** {r.get('action', 'N/A')}{fix}\n"
             md += f"   - Herramienta: `{r.get('tool', 'N/A')}` | Esfuerzo: _{r.get('effort', 'N/A')}_ | Fix disponible: {'✅' if r.get('fix_available') else '❌'}\n\n"
-
     if long_:
         md += "### 🔧 Largo plazo (1–3 meses)\n\n"
         for r in long_:
             md += f"**{r.get('priority', '?')}.** {r.get('action', 'N/A')}\n"
             md += f"   - Herramienta: `{r.get('tool', 'N/A')}` | Esfuerzo: _{r.get('effort', 'N/A')}_\n\n"
-
     return md
 
 
 def format_comparison_section(gate_comparison: dict, ai_eval: dict) -> str:
-    trad = gate_comparison.get('traditional', {})
-    ai = gate_comparison.get('ai_assisted', {})
+    trad     = gate_comparison.get('traditional', {})
+    ai       = gate_comparison.get('ai_assisted', {})
     analysis = gate_comparison.get('analysis', {})
 
     trad_decision = trad.get('decision', 'UNKNOWN')
-    ai_decision = ai.get('decision', 'UNKNOWN')
-    trad_icon = DECISION_ICONS.get(trad_decision, '❓')
-    ai_icon = DECISION_ICONS.get(ai_decision, '❓')
+    ai_decision   = ai.get('decision', 'UNKNOWN')
+    trad_icon     = DECISION_ICONS.get(trad_decision, '❓')
+    ai_icon       = DECISION_ICONS.get(ai_decision, '❓')
 
     md = f"""
 | Criterio | Gate Tradicional | Gate con IA |
@@ -146,8 +140,51 @@ def format_comparison_section(gate_comparison: dict, ai_eval: dict) -> str:
     return md
 
 
+def format_findings_by_tool(findings: list, tool: str, severities: list = None) -> str:
+    """Genera sección de hallazgos filtrados por herramienta y severidad."""
+    filtered = [f for f in findings if f.get('tool') == tool]
+    if severities:
+        filtered = [f for f in filtered if f.get('severity') in severities]
+    if not filtered:
+        return "_No se encontraron hallazgos en esta categoría._\n\n"
+
+    md = ""
+    for f in filtered:
+        icon  = SEVERITY_ICONS.get(f.get('severity'), '⚪')
+        sev   = f.get('severity', '?')
+        title = f.get('title', 'Unknown')
+        md += f"### {icon} [{sev}] {title}\n\n"
+        md += f"| Campo | Valor |\n|---|---|\n"
+        md += f"| **ID** | `{f.get('id', 'N/A')}` |\n"
+        md += f"| **Herramienta** | `{f.get('tool', 'N/A').upper()}` ({f.get('tool_type', 'N/A')}) |\n"
+        md += f"| **Categoría** | {f.get('category', 'N/A')} |\n"
+        if f.get('cwe'):
+            md += f"| **CWE** | `{f.get('cwe')}` |\n"
+        if f.get('cvss_score'):
+            md += f"| **CVSS Score** | `{f.get('cvss_score')}` |\n"
+        loc = f.get('location', {})
+        if loc.get('file'):
+            md += f"| **Archivo** | `{loc['file']}:{loc.get('line', '?')}` |\n"
+        if loc.get('endpoint'):
+            md += f"| **Endpoint** | `{loc.get('method', 'GET')} {loc['endpoint']}` |\n"
+        if f.get('instances_count') and f.get('instances_count', 0) > 1:
+            md += f"| **Instancias** | {f.get('instances_count')} URLs afectadas |\n"
+
+        md += f"\n**Descripción:** {f.get('description', 'N/A')[:400]}\n\n"
+
+        if f.get('evidence') and f.get('evidence') != '':
+            md += f"**Evidencia:** `{f.get('evidence', '')[:200]}`\n\n"
+
+        if f.get('remediation'):
+            md += f"**✅ Remediación:** {f.get('remediation', 'N/A')[:300]}\n\n"
+
+        md += "---\n\n"
+    return md
+
+
 def generate_report(findings_path: str, ai_eval_path: str,
                     gate_path: str, output_path: str):
+
     print("\n" + "="*60)
     print("  GENERADOR DE REPORTE – DevSecOps TG")
     print("="*60)
@@ -159,27 +196,28 @@ def generate_report(findings_path: str, ai_eval_path: str,
     with open(gate_path, 'r') as f:
         gate_data = json.load(f)
 
-    summary = findings_data.get('summary', {})
-    findings = findings_data.get('findings', [])
-    tools = findings_data.get('tools_executed', {})
-    evaluation = ai_eval_data.get('evaluation', {})
+    summary         = findings_data.get('summary', {})
+    findings        = findings_data.get('findings', [])
+    tools           = findings_data.get('tools_executed', {})
+    evaluation      = ai_eval_data.get('evaluation', {})
     gate_comparison = gate_data.get('gate_comparison', {})
 
     final_decision = gate_data.get('decision', 'UNKNOWN')
-    decision_icon = DECISION_ICONS.get(final_decision, '❓')
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    pipeline_run = findings_data.get('pipeline_run', 'local')
-    service = findings_data.get('service', 'unknown')
-    environment = findings_data.get('environment', 'staging')
-    ai_model = ai_eval_data.get('ai_model', 'N/A')
-    tokens = ai_eval_data.get('tokens_used', {})
+    decision_icon  = DECISION_ICONS.get(final_decision, '❓')
+    timestamp      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pipeline_run   = findings_data.get('pipeline_run', 'local')
+    service        = findings_data.get('service', 'unknown')
+    environment    = findings_data.get('environment', 'staging')
+    ai_model       = ai_eval_data.get('ai_model', 'N/A')
+    tokens         = ai_eval_data.get('tokens_used', {})
 
-    attack_chains = evaluation.get('attack_chains', [])
-    key_findings = evaluation.get('key_findings', [])
-    coverage = evaluation.get('coverage_analysis', {})
-    blind_spots = coverage.get('blind_spots', [])
-    risk_score = evaluation.get('risk_score', 0.0)
+    attack_chains  = evaluation.get('attack_chains', [])
+    key_findings   = evaluation.get('key_findings', [])
+    coverage       = evaluation.get('coverage_analysis', {})
+    blind_spots    = coverage.get('blind_spots', [])
+    risk_score     = evaluation.get('risk_score', 0.0)
 
+    # ── Encabezado ────────────────────────────────────────────────────────
     report = f"""# 🔐 Reporte de Seguridad – Pipeline DevSecOps
 ## {decision_icon} Decisión de Despliegue: **{final_decision}**
 
@@ -227,6 +265,7 @@ def generate_report(findings_path: str, ai_eval_path: str,
             report += f"- {c}\n"
         report += "\n"
 
+    # ── Estadísticas ──────────────────────────────────────────────────────
     report += f"""---
 
 ## 📈 Estadísticas de Hallazgos
@@ -281,6 +320,7 @@ def generate_report(findings_path: str, ai_eval_path: str,
             report += f"- {bs}\n"
         report += "\n"
 
+    # ── Hallazgos IA ──────────────────────────────────────────────────────
     report += f"""---
 
 ## 🏆 Hallazgos Principales Identificados por IA
@@ -297,6 +337,7 @@ def generate_report(findings_path: str, ai_eval_path: str,
 """
     report += format_attack_chains(attack_chains)
 
+    # ── Hoja de ruta ──────────────────────────────────────────────────────
     report += f"""---
 
 ## 🛠️ Hoja de Ruta de Remediación
@@ -314,37 +355,94 @@ def generate_report(findings_path: str, ai_eval_path: str,
 
 ---
 
-## 📋 Hallazgos Críticos y Altos (Detalle Técnico)
+## 📋 Hallazgos por Herramienta (Detalle Técnico)
 
 """
 
-    critical_high = [f for f in findings if f.get('severity') in ['CRITICAL', 'HIGH']][:20]
+    # ── TRIVY ─────────────────────────────────────────────────────────────
+    trivy_findings = [f for f in findings if f.get('tool') == 'trivy']
+    trivy_critical_high = [f for f in trivy_findings if f.get('severity') in ['CRITICAL', 'HIGH']]
+    trivy_medium_low    = [f for f in trivy_findings if f.get('severity') in ['MEDIUM', 'LOW', 'INFO']]
 
-    if critical_high:
-        for f in critical_high:
-            icon = SEVERITY_ICONS.get(f.get('severity'), '⚪')
-            report += f"### {icon} [{f.get('severity')}] {f.get('title', 'Unknown')}\n\n"
-            report += f"| Campo | Valor |\n|---|---|\n"
-            report += f"| **ID** | `{f.get('id', 'N/A')}` |\n"
-            report += f"| **Herramienta** | `{f.get('tool', 'N/A').upper()}` ({f.get('tool_type', 'N/A')}) |\n"
-            report += f"| **Categoría** | {f.get('category', 'N/A')} |\n"
-            if f.get('cwe'):
-                report += f"| **CWE** | `{f.get('cwe')}` |\n"
-            if f.get('cvss_score'):
-                report += f"| **CVSS Score** | `{f.get('cvss_score')}` |\n"
-            location = f.get('location', {})
-            if location.get('file'):
-                report += f"| **Archivo** | `{location['file']}:{location.get('line', '?')}` |\n"
-            if location.get('endpoint'):
-                report += f"| **Endpoint** | `{location.get('method', 'GET')} {location['endpoint']}` |\n"
-            report += f"\n**Descripción:** {f.get('description', 'N/A')[:400]}\n\n"
-            if f.get('remediation'):
-                report += f"**✅ Remediación:** {f.get('remediation', 'N/A')[:250]}\n\n"
-            report += "---\n\n"
+    report += f"### 🔬 Trivy – SCA (Análisis de Componentes)\n\n"
+    report += f"Trivy encontró **{len(trivy_findings)} vulnerabilidades** en dependencias de la imagen Docker.\n\n"
+
+    if trivy_critical_high:
+        report += f"#### 🔴🟠 Críticos y Altos ({len(trivy_critical_high)})\n\n"
+        report += format_findings_by_tool(findings, 'trivy', ['CRITICAL', 'HIGH'])
+
+    if trivy_medium_low:
+        report += f"#### 🟡🟢 Medios, Bajos e Info ({len(trivy_medium_low)})\n\n"
+        report += "| Severidad | CVE | Paquete | CVSS | Remediación |\n|---|---|---|---|---|\n"
+        for f in trivy_medium_low:
+            icon        = SEVERITY_ICONS.get(f.get('severity'), '⚪')
+            title       = f.get('title', 'N/A')[:60]
+            cvss        = f.get('cvss_score', 'N/A')
+            remediation = f.get('remediation', 'Ver advisory')[:80]
+            report += f"| {icon} {f.get('severity')} | {title} | {cvss} | {remediation} |\n"
+        report += "\n"
+
+    # ── ZAP ───────────────────────────────────────────────────────────────
+    zap_findings = [f for f in findings if f.get('tool') == 'zap']
+    report += f"\n---\n\n### 🌐 OWASP ZAP – DAST (Análisis Dinámico)\n\n"
+    report += f"ZAP encontró **{len(zap_findings)} alertas** analizando la aplicación en ejecución.\n\n"
+
+    if zap_findings:
+        report += "| Severidad | Alerta | Endpoint | Instancias | Remediación |\n|---|---|---|---|---|\n"
+        for f in sorted(zap_findings, key=lambda x: ['CRITICAL','HIGH','MEDIUM','LOW','INFO'].index(x.get('severity','INFO'))):
+            icon        = SEVERITY_ICONS.get(f.get('severity'), '⚪')
+            title       = f.get('title', 'N/A')[:50]
+            endpoint    = f.get('location', {}).get('endpoint', 'N/A')
+            if endpoint and len(endpoint) > 50:
+                endpoint = endpoint[:50] + '...'
+            instances   = f.get('instances_count', f.get('raw', {}).get('instances_count', 1))
+            remediation = f.get('remediation', 'Ver documentación ZAP')[:80]
+            report += f"| {icon} {f.get('severity')} | {title} | `{endpoint}` | {instances} | {remediation} |\n"
+        report += "\n"
+
+        # Detalle de alertas HIGH+
+        zap_high = [f for f in zap_findings if f.get('severity') in ['CRITICAL', 'HIGH']]
+        if zap_high:
+            report += "#### Detalle alertas críticas/altas de ZAP\n\n"
+            report += format_findings_by_tool(findings, 'zap', ['CRITICAL', 'HIGH'])
+
+    # ── NUCLEI ────────────────────────────────────────────────────────────
+    nuclei_findings = [f for f in findings if f.get('tool') == 'nuclei']
+    report += f"\n---\n\n### 🎯 Nuclei – Pentesting Automatizado\n\n"
+    report += f"Nuclei identificó **{nuclei_findings and len(nuclei_findings) or 0} hallazgos** mediante validación activa de templates.\n\n"
+
+    if nuclei_findings:
+        report += "| Severidad | Hallazgo | Endpoint | Categoría | Remediación |\n|---|---|---|---|---|\n"
+        for f in sorted(nuclei_findings, key=lambda x: ['CRITICAL','HIGH','MEDIUM','LOW','INFO'].index(x.get('severity','INFO'))):
+            icon        = SEVERITY_ICONS.get(f.get('severity'), '⚪')
+            title       = f.get('title', 'N/A')[:50]
+            endpoint    = f.get('location', {}).get('endpoint', 'N/A')
+            if endpoint and len(endpoint) > 50:
+                endpoint = endpoint[:50] + '...'
+            category    = f.get('category', 'N/A')[:40]
+            remediation = f.get('remediation', 'Revisar configuración')[:80]
+            report += f"| {icon} {f.get('severity')} | {title} | `{endpoint}` | {category} | {remediation} |\n"
+        report += "\n"
+
+        # Detalle hallazgos HIGH+
+        nuclei_high = [f for f in nuclei_findings if f.get('severity') in ['CRITICAL', 'HIGH']]
+        if nuclei_high:
+            report += "#### Detalle hallazgos críticos/altos de Nuclei\n\n"
+            report += format_findings_by_tool(findings, 'nuclei', ['CRITICAL', 'HIGH'])
+
+    # ── SEMGREP ───────────────────────────────────────────────────────────
+    semgrep_findings = [f for f in findings if f.get('tool') == 'semgrep']
+    report += f"\n---\n\n### 🔐 Semgrep – SAST (Análisis Estático)\n\n"
+    if semgrep_findings:
+        report += f"Semgrep encontró **{len(semgrep_findings)} hallazgos** en el código fuente.\n\n"
+        report += format_findings_by_tool(findings, 'semgrep')
     else:
-        report += "_No se encontraron hallazgos críticos o altos._\n\n"
+        report += "_Semgrep no encontró hallazgos en el código fuente del engine. " \
+                  "Para analizar el código fuente de la aplicación target, se requiere clonar su repositorio._\n\n"
 
-    report += f"""---
+    # ── Notas académicas ──────────────────────────────────────────────────
+    report += f"""
+---
 
 ## 🎓 Notas Académicas
 
@@ -400,14 +498,15 @@ _Universidad del Valle – Ingeniería de Sistemas – 2026_
     print(f"  📄 Tamaño: {len(report):,} caracteres")
     print(f"  🔗 Cadenas de ataque: {len(attack_chains)}")
     print(f"  🚦 Decisión: {final_decision}")
+    print(f"  📊 Por herramienta — Trivy: {len(trivy_findings)} | ZAP: {len(zap_findings)} | Nuclei: {len(nuclei_findings)} | Semgrep: {len(semgrep_findings)}")
     print("="*60 + "\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--findings', required=True)
-    parser.add_argument('--ai-evaluation', required=True)
-    parser.add_argument('--gate-decision', required=True)
-    parser.add_argument('--output', required=True)
+    parser.add_argument('--findings',       required=True)
+    parser.add_argument('--ai-evaluation',  required=True)
+    parser.add_argument('--gate-decision',  required=True)
+    parser.add_argument('--output',         required=True)
     args = parser.parse_args()
     generate_report(args.findings, args.ai_evaluation, args.gate_decision, args.output)

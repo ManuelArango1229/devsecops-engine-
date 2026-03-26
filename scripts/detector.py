@@ -21,13 +21,12 @@ LANGUAGE_MARKERS = {
 
 SEMGREP_RULESETS = {
     "nodejs":  "p/nodejs p/javascript p/typescript p/secrets",
-    "python":  "p/python p/bandit p/secrets",
+    "python":  "p/python p/secrets",
     "java":    "p/java p/secrets",
     "go":      "p/golang p/secrets",
     "dotnet":  "p/csharp p/secrets",
     "php":     "p/php p/secrets",
     "generic": "p/secrets",
-}
 
 API_SPEC_FILES = [
     "swagger.json", "swagger.yaml", "swagger.yml",
