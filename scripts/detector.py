@@ -24,15 +24,15 @@ LANGUAGE_MARKERS = {
     "php":     ["composer.json", "composer.lock", "artisan"],
 }
 
-# ── Reglas Semgrep por lenguaje ───────────────────────────────────────────────
+# ── Reglas Semgrep por lenguaje (solo rulesets válidos en OSS 2025) ───────────
 SEMGREP_RULESETS = {
-    "nodejs":  "p/nodejs-scan p/javascript p/typescript p/jwt p/xss p/sql-injection",
-    "python":  "p/python p/django p/flask p/fastapi p/bandit",
-    "java":    "p/java p/spring p/owasp-java-top-ten",
-    "go":      "p/golang p/gosec",
-    "dotnet":  "p/csharp p/dotnet",
-    "php":     "p/php p/laravel",
-    "generic": "p/secrets p/security-audit",
+    "nodejs":  "p/nodejs p/javascript p/typescript p/jwt p/xss p/sql-injection p/secrets",
+    "python":  "p/python p/django p/flask p/bandit p/secrets",
+    "java":    "p/java p/spring p/secrets",
+    "go":      "p/golang p/gosec p/secrets",
+    "dotnet":  "p/csharp p/secrets",
+    "php":     "p/php p/secrets",
+    "generic": "p/secrets p/default",
 }
 
 # ── Archivos de spec de API ───────────────────────────────────────────────────
@@ -129,7 +129,6 @@ def detect_api_spec(base: Path, target_url: str) -> dict:
             "enable_api_scan": True,
         }
 
-    # Intentar URL estándar si hay target
     if target_url:
         common_spec_paths = ["/swagger.json", "/openapi.json", "/api-docs", "/v3/api-docs"]
         return {
@@ -161,11 +160,6 @@ def build_semgrep_config(language_info: dict) -> dict:
     """Construye la configuración de Semgrep según el lenguaje."""
     primary = language_info.get("primary", "generic")
     rulesets = SEMGREP_RULESETS.get(primary, SEMGREP_RULESETS["generic"])
-
-    # Siempre añadir reglas de secretos
-    if "p/secrets" not in rulesets:
-        rulesets += " p/secrets"
-
     return {
         "rulesets": rulesets,
         "language": primary,
@@ -231,16 +225,15 @@ def detect(base_path: str, target_image: str, target_url: str,
     print(f"  Analizando: {base_path}")
     print()
 
-    language = detect_language(base)
-    scan_mode = detect_scan_mode(base, target_image, target_url)
-    api_spec = detect_api_spec(base, target_url or "")
+    language     = detect_language(base)
+    scan_mode    = detect_scan_mode(base, target_image, target_url)
+    api_spec     = detect_api_spec(base, target_url or "")
     secrets_config = detect_secrets_config(base)
 
     semgrep_config = build_semgrep_config(language)
-    trivy_config = build_trivy_config(scan_mode)
-    nuclei_config = build_nuclei_config(scan_mode, api_spec)
+    trivy_config   = build_trivy_config(scan_mode)
+    nuclei_config  = build_nuclei_config(scan_mode, api_spec)
 
-    # Determinar si aplica DAST
     dast_enabled = scan_mode.get("mode") != "static"
 
     config = {
@@ -288,13 +281,13 @@ def detect(base_path: str, target_image: str, target_url: str,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Auto-detector de contexto DevSecOps")
-    parser.add_argument("--path", default=".", help="Ruta del repositorio a analizar")
-    parser.add_argument("--output", required=True, help="Ruta de salida para scan_config.json")
-    parser.add_argument("--target-image", default="", help="Imagen Docker (opcional)")
-    parser.add_argument("--target-url", default="", help="URL externa (opcional)")
-    parser.add_argument("--service", default="unknown")
-    parser.add_argument("--criticality", default="medium")
-    parser.add_argument("--environment", default="staging")
+    parser.add_argument("--path",           default=".",  help="Ruta del repositorio a analizar")
+    parser.add_argument("--output",         required=True, help="Ruta de salida para scan_config.json")
+    parser.add_argument("--target-image",   default="",   help="Imagen Docker (opcional)")
+    parser.add_argument("--target-url",     default="",   help="URL externa (opcional)")
+    parser.add_argument("--service",        default="unknown")
+    parser.add_argument("--criticality",    default="medium")
+    parser.add_argument("--environment",    default="staging")
 
     args = parser.parse_args()
 
@@ -311,4 +304,11 @@ if __name__ == "__main__":
     with open(args.output, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
+    # Validar que el output es completo antes de terminar
+    with open(args.output) as f:
+        check = json.load(f)
+    assert "language" in check and "scan_mode" in check and "summary" in check, \
+        "❌ scan_config.json incompleto — falta language, scan_mode o summary"
+
     print(f"✅ scan_config.json generado en: {args.output}")
+    print(f"   Lenguaje: {check['language']['primary']} | Modo: {check['scan_mode']['mode']}")

@@ -34,17 +34,17 @@ def run_nmap(host: str, port: int) -> dict:
     """Escaneo de puertos y detección de servicios con nmap."""
     print("  🔍 nmap: escaneando puertos y servicios...")
 
+    # Rango reducido (1-1000) para que no supere el timeout de CI
     stdout, stderr, rc = run_cmd([
-        "nmap", "-sV", "-sC", "-T4",
+        "nmap", "-sV", "-T4",
         "--open",
-        "-p", f"1-10000",
-        "--script", "http-headers,http-title,http-methods",
+        "-p", f"1-1000,{port}",
         host
-    ], timeout=120)
+    ], timeout=60)
 
     if rc == 127:
         print("  ⚠️  nmap no disponible, saltando...")
-        return {"available": False, "open_ports": [port], "services": {}}
+        return {"available": False, "open_ports": [port], "services": {}, "interesting_ports": []}
 
     open_ports = []
     services = {}
@@ -54,24 +54,26 @@ def run_nmap(host: str, port: int) -> dict:
         if "/tcp" in line and "open" in line:
             parts = line.split()
             if parts:
-                port_num = int(parts[0].split("/")[0])
-                service = parts[2] if len(parts) > 2 else "unknown"
-                version = " ".join(parts[3:]) if len(parts) > 3 else ""
-                open_ports.append(port_num)
-                services[str(port_num)] = {
-                    "service": service,
-                    "version": version.strip(),
-                    "interesting": any(kw in service.lower() for kw in
-                                       ["debug", "admin", "mongo", "redis", "mysql", "postgres"])
-                }
+                try:
+                    port_num = int(parts[0].split("/")[0])
+                    service  = parts[2] if len(parts) > 2 else "unknown"
+                    version  = " ".join(parts[3:]) if len(parts) > 3 else ""
+                    open_ports.append(port_num)
+                    services[str(port_num)] = {
+                        "service": service,
+                        "version": version.strip(),
+                        "interesting": any(kw in service.lower() for kw in
+                                           ["debug", "admin", "mongo", "redis", "mysql", "postgres"])
+                    }
+                except (ValueError, IndexError):
+                    continue
 
     interesting = [p for p, info in services.items() if info.get("interesting")]
-
     print(f"  ✅ nmap: {len(open_ports)} puertos abiertos, {len(interesting)} interesantes")
 
     return {
         "available": True,
-        "open_ports": open_ports,
+        "open_ports": open_ports or [port],
         "services": services,
         "interesting_ports": interesting,
         "raw_summary": "\n".join(l for l in lines if "/tcp" in l or "SERVICE" in l)
@@ -82,7 +84,6 @@ def run_ffuf(target_url: str) -> dict:
     """Descubrimiento de rutas y endpoints con ffuf."""
     print("  🔍 ffuf: descubriendo rutas y endpoints...")
 
-    # Wordlist mínima embebida para no depender de archivos externos
     common_paths = [
         "api", "api/v1", "api/v2", "api/v3",
         "admin", "administration", "dashboard",
@@ -171,7 +172,10 @@ def run_gobuster(target_url: str, paths: list) -> dict:
             parts = line.split()
             if parts:
                 path = parts[0].strip()
-                status = int(parts[1].strip("()")) if len(parts) > 1 else 200
+                try:
+                    status = int(parts[1].strip("()")) if len(parts) > 1 else 200
+                except ValueError:
+                    status = 200
                 discovered.append({"path": path, "status": status, "interesting": status == 200})
 
     return {
@@ -199,21 +203,16 @@ def run_httpx(target_url: str) -> dict:
     ], timeout=30)
 
     if rc == 127:
-        # Fallback: curl para headers básicos
         return run_curl_headers(target_url)
 
     try:
         data = json.loads(stdout.strip().split("\n")[0] if stdout.strip() else "{}")
         technologies = data.get("tech", [])
-        server = data.get("webserver", "")
-        title = data.get("title", "")
+        server       = data.get("webserver", "")
+        title        = data.get("title", "")
 
-        # Analizar headers de seguridad
         headers = data.get("headers", {})
-        security_headers = {
-            "present": [],
-            "missing": [],
-        }
+        security_headers = {"present": [], "missing": []}
         important_headers = [
             "content-security-policy", "strict-transport-security",
             "x-frame-options", "x-content-type-options",
@@ -236,7 +235,7 @@ def run_httpx(target_url: str) -> dict:
             "security_headers": security_headers,
             "status_code": data.get("status-code", 0),
         }
-    except Exception as e:
+    except Exception:
         return run_curl_headers(target_url)
 
 
@@ -252,7 +251,7 @@ def run_curl_headers(target_url: str) -> dict:
         "content-security-policy", "strict-transport-security",
         "x-frame-options", "x-content-type-options",
     ]
-    server = ""
+    server       = ""
     stdout_lower = stdout.lower()
 
     for h in important:
@@ -290,14 +289,13 @@ def run_wafw00f(target_url: str) -> dict:
         return {"available": False, "waf_detected": False, "waf_name": None}
 
     try:
-        data = json.loads(stdout)
-        waf = data[0] if data else {}
+        data    = json.loads(stdout)
+        waf     = data[0] if data else {}
         detected = bool(waf.get("detected"))
-        name = waf.get("firewall") if detected else None
-        print(f"  ✅ wafw00f: WAF {'detectado: ' + name if detected else 'no detectado'}")
+        name    = waf.get("firewall") if detected else None
+        print(f"  ✅ wafw00f: WAF {'detectado: ' + str(name) if detected else 'no detectado'}")
         return {"available": True, "waf_detected": detected, "waf_name": name}
     except Exception:
-        # Parsear salida de texto
         detected = "is behind" in stdout.lower()
         print(f"  ✅ wafw00f: WAF {'detectado' if detected else 'no detectado'}")
         return {"available": True, "waf_detected": detected, "waf_name": None}
@@ -308,7 +306,6 @@ def analyze_attack_surface(nmap_r: dict, ffuf_r: dict,
     """Genera un análisis de superficie de ataque."""
     findings = []
 
-    # Puertos interesantes
     for port in nmap_r.get("interesting_ports", []):
         svc = nmap_r.get("services", {}).get(str(port), {})
         findings.append({
@@ -318,7 +315,6 @@ def analyze_attack_surface(nmap_r: dict, ffuf_r: dict,
                       f"{svc.get('version', '')}",
         })
 
-    # Headers de seguridad faltantes
     missing = httpx_r.get("security_headers", {}).get("missing", [])
     if missing:
         findings.append({
@@ -327,7 +323,6 @@ def analyze_attack_surface(nmap_r: dict, ffuf_r: dict,
             "detail": f"Headers faltantes: {', '.join(missing)}",
         })
 
-    # Rutas sensibles descubiertas
     sensitive_keywords = [
         "admin", "backup", "dump", ".env", ".git",
         "actuator", "debug", "test", "dev"
@@ -340,7 +335,6 @@ def analyze_attack_surface(nmap_r: dict, ffuf_r: dict,
                 "detail": f"Ruta sensible accesible: {route}",
             })
 
-    # Sin WAF
     if not wafw_r.get("waf_detected"):
         findings.append({
             "type": "no_waf",
@@ -350,9 +344,9 @@ def analyze_attack_surface(nmap_r: dict, ffuf_r: dict,
 
     return {
         "total_findings": len(findings),
-        "high": len([f for f in findings if f["severity"] == "HIGH"]),
+        "high":   len([f for f in findings if f["severity"] == "HIGH"]),
         "medium": len([f for f in findings if f["severity"] == "MEDIUM"]),
-        "info": len([f for f in findings if f["severity"] == "INFO"]),
+        "info":   len([f for f in findings if f["severity"] == "INFO"]),
         "findings": findings,
     }
 
@@ -367,19 +361,25 @@ def recon(target_url: str, output_path: str):
     print()
 
     parsed = urlparse(target_url)
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 80
+    host   = parsed.hostname or "localhost"
+    port   = parsed.port or 80
 
-    # Ejecutar herramientas
     nmap_result  = run_nmap(host, port)
     ffuf_result  = run_ffuf(target_url)
     httpx_result = run_httpx(target_url)
     wafw_result  = run_wafw00f(target_url)
 
-    # Análisis de superficie de ataque
     attack_surface = analyze_attack_surface(
         nmap_result, ffuf_result, httpx_result, wafw_result
     )
+
+    # Construir lista de targets para Nuclei — siempre incluir el target base
+    nuclei_targets = [target_url]
+    extra_routes   = ffuf_result.get("discovered_routes", [])
+    if extra_routes:
+        nuclei_targets += [target_url.rstrip("/") + r for r in extra_routes]
+    # Deduplicar
+    nuclei_targets = list(dict.fromkeys(nuclei_targets))
 
     context = {
         "schema_version": "1.0",
@@ -392,11 +392,7 @@ def recon(target_url: str, output_path: str):
         "fingerprint": httpx_result,
         "waf": wafw_result,
         "attack_surface": attack_surface,
-        "nuclei_targets": (
-            [target_url + r for r in ffuf_result.get("discovered_routes", [])]
-            if ffuf_result.get("discovered_routes")
-            else [target_url]
-        ),
+        "nuclei_targets": nuclei_targets,
         "summary": {
             "open_ports": nmap_result.get("open_ports", [port]),
             "discovered_routes_count": len(ffuf_result.get("discovered_routes", [])),
