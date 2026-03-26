@@ -27,6 +27,7 @@ SEMGREP_RULESETS = {
     "dotnet":  "p/csharp p/secrets",
     "php":     "p/php p/secrets",
     "generic": "p/secrets",
+}
 
 API_SPEC_FILES = [
     "swagger.json", "swagger.yaml", "swagger.yml",
