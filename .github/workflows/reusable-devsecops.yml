@@ -1,16 +1,23 @@
-name: Reusable DevSecOps Pipeline
+name: Reusable DevSecOps Pipeline v2
 
 on:
   workflow_call:
     inputs:
       target_image:
         description: 'Imagen Docker del target (ej: bkimminich/juice-shop)'
-        required: true
+        required: false
         type: string
+        default: ''
+      target_url:
+        description: 'URL externa si la app ya está desplegada (sin Docker)'
+        required: false
+        type: string
+        default: ''
       target_port:
         description: 'Puerto donde corre la app (ej: 3000)'
-        required: true
+        required: false
         type: string
+        default: '8080'
       service_name:
         description: 'Nombre del servicio para el reporte'
         required: true
@@ -31,18 +38,74 @@ on:
         type: string
         default: ''
     secrets:
-      OPENAI_API_KEY:
-        required: false
       GROQ_API_KEY:
+        required: false
+      OPENAI_API_KEY:
         required: false
       ANTHROPIC_API_KEY:
         required: false
 
 jobs:
 
-  sast-semgrep:
-    name: SAST – Semgrep
+  # ── JOB 0: Auto-detector ─────────────────────────────────────────────────
+  detect:
+    name: Auto-detección de contexto
     runs-on: ubuntu-latest
+    outputs:
+      language: ${{ steps.detect.outputs.language }}
+      scan_mode: ${{ steps.detect.outputs.scan_mode }}
+      dast_enabled: ${{ steps.detect.outputs.dast_enabled }}
+      semgrep_rules: ${{ steps.detect.outputs.semgrep_rules }}
+    steps:
+      - name: Checkout repo cliente (para detectar lenguaje)
+        uses: actions/checkout@v4
+
+      - name: Checkout ENGINE scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
+          path: engine
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run detector
+        id: detect
+        run: |
+          python3 engine/scripts/detector.py \
+            --path . \
+            --output reports/scan_config.json \
+            --target-image "${{ inputs.target_image }}" \
+            --target-url "${{ inputs.target_url }}" \
+            --service "${{ inputs.service_name }}" \
+            --criticality "${{ inputs.criticality }}" \
+            --environment "${{ inputs.environment }}"
+
+          # Exportar outputs para otros jobs
+          LANG=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['language']['primary'])")
+          MODE=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['scan_mode']['mode'])")
+          DAST=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(str(d['summary']['dast_enabled']).lower())")
+          RULES=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['tools']['semgrep']['rulesets'])")
+
+          echo "language=$LANG" >> $GITHUB_OUTPUT
+          echo "scan_mode=$MODE" >> $GITHUB_OUTPUT
+          echo "dast_enabled=$DAST" >> $GITHUB_OUTPUT
+          echo "semgrep_rules=$RULES" >> $GITHUB_OUTPUT
+
+          echo "✅ Lenguaje: $LANG | Modo: $MODE | DAST: $DAST"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scan-config
+          path: reports/scan_config.json
+
+  # ── JOB 1: SAST con reglas por lenguaje ──────────────────────────────────
+  sast-semgrep:
+    name: SAST – Semgrep (${{ needs.detect.outputs.language }})
+    runs-on: ubuntu-latest
+    needs: [detect]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,23 +113,35 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Run Semgrep
+      - name: Run Semgrep con reglas detectadas
         run: |
           mkdir -p reports
-          semgrep --config auto --json --output reports/semgrep_report.json --no-error . || true
+          RULES="${{ needs.detect.outputs.semgrep_rules }}"
+          echo "Usando reglas: $RULES"
+
+          semgrep \
+            --config $RULES \
+            --json \
+            --output reports/semgrep_report.json \
+            --no-error . || true
+
           if [ ! -f reports/semgrep_report.json ] || [ ! -s reports/semgrep_report.json ]; then
             echo '{"results": [], "errors": [], "version": "1.0"}' > reports/semgrep_report.json
           fi
-          echo "Semgrep done: $(cat reports/semgrep_report.json | python3 -c "import json,sys;d=json.load(sys.stdin);print(len(d.get('results',[])))" 2>/dev/null || echo 0) findings"
+
+          COUNT=$(python3 -c "import json,sys; d=json.load(open('reports/semgrep_report.json')); print(len(d.get('results',[])))" 2>/dev/null || echo 0)
+          echo "Semgrep done: $COUNT findings con reglas de ${{ needs.detect.outputs.language }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: reports/semgrep_report.json
 
+  # ── JOB 2: SCA ────────────────────────────────────────────────────────────
   sca-trivy:
     name: SCA – Trivy
     runs-on: ubuntu-latest
+    needs: [detect]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,63 +153,182 @@ jobs:
           echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
           sudo apt-get update && sudo apt-get install -y trivy
 
-      - name: Build image if local
-        if: ${{ inputs.build_context != '' }}
-        run: docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+      - name: Build or pull image
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        run: |
+          if [ -n "${{ inputs.build_context }}" ]; then
+            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+          else
+            docker pull ${{ inputs.target_image }} || true
+          fi
 
-      - name: Pull image if remote
-        if: ${{ inputs.build_context == '' }}
-        run: docker pull ${{ inputs.target_image }} || true
-
-      - name: Run Trivy
+      - name: Run Trivy (imagen)
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
           mkdir -p reports
-          trivy image --format json --output reports/trivy_report.json \
-            --severity CRITICAL,HIGH,MEDIUM --no-progress \
+          trivy image \
+            --format json \
+            --output reports/trivy_report.json \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --scanners vuln,secret,misconfig \
+            --no-progress \
             ${{ inputs.target_image }} || true
-          echo "Trivy done"
+          echo "Trivy image done"
+
+      - name: Run Trivy (filesystem — modo static o url)
+        if: ${{ inputs.target_image == '' || inputs.target_url != '' }}
+        run: |
+          mkdir -p reports
+          trivy fs \
+            --format json \
+            --output reports/trivy_report.json \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --scanners vuln,secret,misconfig \
+            --no-progress \
+            . || true
+          echo "Trivy filesystem done"
 
       - uses: actions/upload-artifact@v4
         with:
           name: trivy-report
           path: reports/trivy_report.json
 
-  dast-zap:
-    name: DAST – OWASP ZAP
+  # ── JOB 3: Reconocimiento activo ─────────────────────────────────────────
+  recon:
+    name: Reconocimiento Activo
     runs-on: ubuntu-latest
+    needs: [detect]
+    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
     steps:
-      - name: Checkout
+      - name: Checkout ENGINE repo
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
-      - name: Build image if local
-        if: ${{ inputs.build_context != '' }}
-        run: docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build or pull image
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        run: |
+          if [ -n "${{ inputs.build_context }}" ]; then
+            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+          else
+            docker pull ${{ inputs.target_image }} || true
+          fi
 
       - name: Start target app
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
           docker run -d --name target-app \
             -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
             ${{ inputs.target_image }}
           echo "Esperando app..."
-          for i in {1..30}; do
-            curl -sf http://localhost:${{ inputs.target_port }} > /dev/null 2>&1 && echo "App lista" && break
+          for i in {1..40}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ inputs.target_port }} 2>/dev/null)
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ]; then
+              echo "App lista (HTTP $STATUS)"
+              break
+            fi
+            echo "Intento $i: HTTP $STATUS..."
             sleep 5
           done
+
+      - name: Set target URL
+        id: target
+        run: |
+          if [ -n "${{ inputs.target_url }}" ]; then
+            echo "url=${{ inputs.target_url }}" >> $GITHUB_OUTPUT
+          else
+            HOST_IP=$(ip route show default | awk '/default/ {print $3}')
+            echo "url=http://$HOST_IP:${{ inputs.target_port }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install recon tools
+        run: |
+          sudo apt-get install -y nmap curl
+          pip install wafw00f --break-system-packages || true
+
+          # Instalar ffuf
+          go install github.com/ffuf/ffuf/v2@latest 2>/dev/null || \
+          wget -q https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_amd64.tar.gz \
+            -O /tmp/ffuf.tar.gz && tar -xzf /tmp/ffuf.tar.gz -C /usr/local/bin ffuf 2>/dev/null || true
+
+          # Instalar httpx
+          go install github.com/projectdiscovery/httpx/cmd/httpx@latest 2>/dev/null || true
+
+      - name: Run reconocimiento
+        run: |
+          mkdir -p reports
+          python3 scripts/recon.py \
+            --target "${{ steps.target.outputs.url }}" \
+            --output reports/recon_context.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recon-context
+          path: reports/recon_context.json
+
+  # ── JOB 4: DAST – ZAP ────────────────────────────────────────────────────
+  dast-zap:
+    name: DAST – OWASP ZAP
+    runs-on: ubuntu-latest
+    needs: [detect, recon]
+    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
+    steps:
+      - name: Checkout ENGINE repo
+        uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
+
+      - name: Build or pull image
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        run: |
+          if [ -n "${{ inputs.build_context }}" ]; then
+            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+          else
+            docker pull ${{ inputs.target_image }} || true
+          fi
+
+      - name: Start target app
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        run: |
+          docker run -d --name target-app \
+            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
+            ${{ inputs.target_image }}
+          for i in {1..40}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ inputs.target_port }} 2>/dev/null)
+            [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] && echo "App lista" && break
+            sleep 5
+          done
+
+      - name: Download recon context
+        uses: actions/download-artifact@v4
+        with:
+          name: recon-context
+          path: reports/
 
       - name: Run ZAP Baseline
         run: |
           mkdir -p reports
           chmod -R 777 reports
 
-          HOST_IP=$(ip route show default | awk '/default/ {print $3}')
-          echo "Host IP: $HOST_IP"
+          if [ -n "${{ inputs.target_url }}" ]; then
+            TARGET_URL="${{ inputs.target_url }}"
+          else
+            HOST_IP=$(ip route show default | awk '/default/ {print $3}')
+            TARGET_URL="http://$HOST_IP:${{ inputs.target_port }}"
+          fi
 
           docker run --rm \
             -v $(pwd)/reports:/zap/wrk:rw \
             -u root \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
-            -t http://$HOST_IP:${{ inputs.target_port }} \
+            -t $TARGET_URL \
             -J /zap/wrk/zap_report.json \
             -r /zap/wrk/zap_report.html \
             -l WARN -I || true
@@ -142,53 +336,109 @@ jobs:
           if [ ! -f reports/zap_report.json ]; then
             echo '{"site":[{"alerts":[]}],"@version":"2.14.0"}' > reports/zap_report.json
           fi
-
           echo "ZAP done"
 
       - uses: actions/upload-artifact@v4
         with:
           name: zap-report
-          path: |
-            reports/zap_report.json
+          path: reports/zap_report.json
 
+  # ── JOB 5: Pentesting Nuclei (con recon context) ─────────────────────────
   pentest-nuclei:
-    name: Pentesting – Nuclei
+    name: Pentesting – Nuclei (v3.3.8)
     runs-on: ubuntu-latest
+    needs: [detect, recon]
+    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
     steps:
-      - name: Checkout
+      - name: Checkout ENGINE repo
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
-      - name: Build image if local
-        if: ${{ inputs.build_context != '' }}
-        run: docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+      - name: Build or pull image
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        run: |
+          if [ -n "${{ inputs.build_context }}" ]; then
+            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
+          else
+            docker pull ${{ inputs.target_image }} || true
+          fi
 
       - name: Start target app
+        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
           docker run -d --name target-app \
             -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
             ${{ inputs.target_image }}
-          echo "Esperando app..."
-          for i in {1..30}; do
-            curl -sf http://localhost:${{ inputs.target_port }} > /dev/null 2>&1 && echo "App lista" && break
+          for i in {1..40}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ inputs.target_port }} 2>/dev/null)
+            [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] && echo "App lista" && break
             sleep 5
           done
 
-      - name: Install and Run Nuclei
+      - name: Download recon context
+        uses: actions/download-artifact@v4
+        with:
+          name: recon-context
+          path: reports/
+
+      - name: Install Nuclei v3.3.8 (versión estable)
         run: |
-          sudo apt-get install -y golang-go
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          ~/go/bin/nuclei -update-templates -silent || true
+          wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.3.8/nuclei_3.3.8_linux_amd64.zip \
+            -O /tmp/nuclei.zip
+          unzip -q /tmp/nuclei.zip -d /tmp/nuclei_bin
+          sudo mv /tmp/nuclei_bin/nuclei /usr/local/bin/nuclei
+          chmod +x /usr/local/bin/nuclei
+          nuclei -version
+
+      - name: Update Nuclei templates
+        run: nuclei -update-templates -silent || true
+
+      - name: Set target URL
+        id: target
+        run: |
+          if [ -n "${{ inputs.target_url }}" ]; then
+            echo "url=${{ inputs.target_url }}" >> $GITHUB_OUTPUT
+          else
+            HOST_IP=$(ip route show default | awk '/default/ {print $3}')
+            echo "url=http://$HOST_IP:${{ inputs.target_port }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Nuclei con rutas del recon
+        run: |
           mkdir -p reports
-          HOST_IP=$(ip route show default | awk '/default/ {print $3}')
-          ~/go/bin/nuclei \
-            -u http://$HOST_IP:${{ inputs.target_port }} \
-            -automatic-scan \
+          TARGET="${{ steps.target.outputs.url }}"
+
+          # Extraer rutas descubiertas por recon
+          python3 -c "
+          import json, sys
+          try:
+              d = json.load(open('reports/recon_context.json'))
+              targets = d.get('nuclei_targets', ['$TARGET'])
+              with open('/tmp/nuclei_targets.txt', 'w') as f:
+                  f.write('\n'.join(targets))
+              print(f'Targets para Nuclei: {len(targets)}')
+          except Exception as e:
+              print(f'Sin recon context, usando target base: {e}')
+              with open('/tmp/nuclei_targets.txt', 'w') as f:
+                  f.write('$TARGET')
+          "
+
+          # Run Nuclei con targets enriquecidos
+          nuclei \
+            -list /tmp/nuclei_targets.txt \
+            -tags owasp,jwt,sqli,xss,exposure,misconfig,cve,token,auth,api,swagger \
+            -severity info,low,medium,high,critical \
             -json-export reports/nuclei_report.json \
-            -severity low,medium,high,critical \
-            -timeout 30 -silent || true
-          if [ ! -f reports/nuclei_report.json ]; then
+            -timeout 30 \
+            -rate-limit 50 \
+            -silent || true
+
+          if [ ! -f reports/nuclei_report.json ] || [ ! -s reports/nuclei_report.json ]; then
             echo '[]' > reports/nuclei_report.json
           fi
+
           echo "Nuclei done: $(wc -l < reports/nuclei_report.json) findings"
 
       - uses: actions/upload-artifact@v4
@@ -196,12 +446,14 @@ jobs:
           name: nuclei-report
           path: reports/nuclei_report.json
 
+  # ── JOB 6: Evaluación IA + Gate + Reporte ────────────────────────────────
   ai-evaluation:
     name: Evaluacion IA + Security Gate
     runs-on: ubuntu-latest
-    needs: [sast-semgrep, sca-trivy, dast-zap, pentest-nuclei]
+    needs: [detect, sast-semgrep, sca-trivy, dast-zap, pentest-nuclei, recon]
+    if: always()
     steps:
-      - name: Checkout ENGINE repo (scripts)
+      - name: Checkout ENGINE repo
         uses: actions/checkout@v4
         with:
           repository: ManuelArango1229/devsecops-engine-
@@ -222,6 +474,7 @@ jobs:
       - name: Flatten reports
         run: |
           find reports/ -name "*.json" -exec cp {} reports/ \; 2>/dev/null || true
+          ls -la reports/
 
       - name: Normalize findings
         run: |
@@ -234,7 +487,7 @@ jobs:
 
       - name: AI Evaluation
         env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}  
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -265,6 +518,8 @@ jobs:
         with:
           name: devsecops-final-report
           path: |
+            reports/scan_config.json
+            reports/recon_context.json
             reports/findings.json
             reports/ai_evaluation.json
             reports/gate_decision.json
