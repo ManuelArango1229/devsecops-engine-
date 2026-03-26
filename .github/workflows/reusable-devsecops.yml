@@ -3,8 +3,9 @@ name: Reusable DevSecOps Pipeline v2
 on:
   workflow_call:
     inputs:
+      # ── Target ───────────────────────────────────────────────────────────
       target_image:
-        description: 'Imagen Docker del target (ej: bkimminich/juice-shop)'
+        description: 'Imagen Docker del target (ej: bkimminich/juice-shop o ghcr.io/org/app:sha)'
         required: false
         type: string
         default: ''
@@ -18,6 +19,8 @@ on:
         required: false
         type: string
         default: '8080'
+
+      # ── Metadata del servicio ─────────────────────────────────────────────
       service_name:
         description: 'Nombre del servicio para el reporte'
         required: true
@@ -32,17 +35,57 @@ on:
         required: false
         type: string
         default: 'staging'
+
+      # ── Build ─────────────────────────────────────────────────────────────
       build_context:
         description: 'Carpeta del Dockerfile si se construye local (opcional)'
         required: false
         type: string
         default: ''
+
+      # ── SAST: código fuente externo ───────────────────────────────────────
+      source_repo:
+        description: >
+          Repo cuyo código fuente se escaneará con Semgrep.
+          Formato: 'owner/repo' (ej: ManuelArango1229/Backend-FitFusion).
+          Si se omite, Semgrep escanea el código del engine.
+        required: false
+        type: string
+        default: ''
+      source_repo_ref:
+        description: 'Branch/tag/sha del source_repo a clonar (default: main)'
+        required: false
+        type: string
+        default: 'main'
+
+      # ── Lenguaje (override del auto-detector) ─────────────────────────────
+      language:
+        description: >
+          Forzar lenguaje para Semgrep: nodejs, python, java, go, dotnet, php.
+          Si se omite, se auto-detecta del código del engine o del source_repo.
+        required: false
+        type: string
+        default: ''
+
     secrets:
+      # ── IA ────────────────────────────────────────────────────────────────
       GROQ_API_KEY:
         required: false
       OPENAI_API_KEY:
         required: false
       ANTHROPIC_API_KEY:
+        required: false
+
+      # ── Runtime secrets del target ────────────────────────────────────────
+      # Formato: "KEY1=valor1,KEY2=valor2,KEY3=valor3"
+      # El caller extrae sus propios secrets de GitHub y los concatena aquí.
+      # Ejemplo en el caller:
+      #   APP_SECRETS: "MONGO_URI=${{ secrets.MONGO_URI }},JWT_SECRET=${{ secrets.JWT_SECRET }}"
+      APP_SECRETS:
+        required: false
+
+      # Token para hacer pull de imágenes privadas en GHCR
+      GHCR_TOKEN:
         required: false
 
 jobs:
@@ -63,18 +106,25 @@ jobs:
           repository: ManuelArango1229/devsecops-engine-
           ref: main
 
+      # Si hay source_repo, clonarlo para que el detector detecte su lenguaje
+      - name: Checkout source repo (si aplica)
+        if: ${{ inputs.source_repo != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.source_repo_ref }}
+          path: source_to_scan
+          token: ${{ secrets.GHCR_TOKEN || github.token }}
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Verificar estructura del engine
         run: |
-          echo "=== Contenido raíz ==="
-          ls -la
-          echo "=== scripts/ ==="
-          ls -la scripts/ 2>/dev/null || echo "❌ carpeta scripts/ no encontrada"
           if [ ! -f scripts/detector.py ]; then
             echo "❌ FATAL: scripts/detector.py no existe"
+            ls -la scripts/ 2>/dev/null || echo "scripts/ vacío"
             exit 1
           fi
           echo "✅ scripts/detector.py encontrado"
@@ -84,8 +134,15 @@ jobs:
         run: |
           mkdir -p reports
 
+          # Analizar source_repo si existe, si no el engine
+          DETECT_PATH="."
+          if [ -n "${{ inputs.source_repo }}" ] && [ -d "source_to_scan" ]; then
+            DETECT_PATH="source_to_scan"
+            echo "🔍 Detectando lenguaje en: ${{ inputs.source_repo }}"
+          fi
+
           python3 scripts/detector.py \
-            --path . \
+            --path "$DETECT_PATH" \
             --output reports/scan_config.json \
             --target-image "${{ inputs.target_image }}" \
             --target-url   "${{ inputs.target_url }}" \
@@ -108,16 +165,35 @@ jobs:
           print('   dast      :', d['summary']['dast_enabled'])
           "
 
-          LANG=$(python3  -c "import json; d=json.load(open('reports/scan_config.json')); print(d['language']['primary'])")
-          MODE=$(python3  -c "import json; d=json.load(open('reports/scan_config.json')); print(d['scan_mode']['mode'])")
-          DAST=$(python3  -c "import json; d=json.load(open('reports/scan_config.json')); print(str(d['summary']['dast_enabled']).lower())")
-          RULES=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['tools']['semgrep']['rulesets'])")
+          LANG=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['language']['primary'])")
+          MODE=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['scan_mode']['mode'])")
+          DAST=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(str(d['summary']['dast_enabled']).lower())")
 
-          echo "language=$LANG"       >> $GITHUB_OUTPUT
-          echo "scan_mode=$MODE"      >> $GITHUB_OUTPUT
-          echo "dast_enabled=$DAST"   >> $GITHUB_OUTPUT
-          echo "semgrep_rules=$RULES" >> $GITHUB_OUTPUT
-          echo "✅ Lenguaje: $LANG | Modo: $MODE | DAST: $DAST"
+          # Override de lenguaje si el caller lo especifica
+          if [ -n "${{ inputs.language }}" ]; then
+            LANG="${{ inputs.language }}"
+            echo "⚡ Lenguaje forzado por el caller: $LANG"
+          fi
+
+          # Resolver reglas Semgrep según el lenguaje final
+          RULES=$(python3 -c "
+          rulesets = {
+              'nodejs':  'p/nodejs p/javascript p/typescript',
+              'python':  'p/python',
+              'java':    'p/java',
+              'go':      'p/golang',
+              'dotnet':  'p/csharp',
+              'php':     'p/php',
+              'generic': 'p/python',
+          }
+          print(rulesets.get('$LANG', 'p/python'))
+          ")
+
+          echo "language=$LANG"        >> $GITHUB_OUTPUT
+          echo "scan_mode=$MODE"       >> $GITHUB_OUTPUT
+          echo "dast_enabled=$DAST"    >> $GITHUB_OUTPUT
+          echo "semgrep_rules=$RULES"  >> $GITHUB_OUTPUT
+          echo "✅ Lenguaje: $LANG | Modo: $MODE | DAST: $DAST | Reglas: $RULES"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -136,6 +212,16 @@ jobs:
           repository: ManuelArango1229/devsecops-engine-
           ref: main
 
+      # Clonar el source_repo si el caller lo especificó
+      - name: Checkout source repo para SAST
+        if: ${{ inputs.source_repo != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.source_repo_ref }}
+          path: source_to_scan
+          token: ${{ secrets.GHCR_TOKEN || github.token }}
+
       - name: Install Semgrep
         run: pip install semgrep
 
@@ -143,14 +229,24 @@ jobs:
         run: |
           mkdir -p reports
           RULES="${{ needs.detect.outputs.semgrep_rules }}"
-          echo "Usando reglas: $RULES"
+
+          # Escanear el source_repo si existe, si no el engine
+          SCAN_PATH="."
+          if [ -n "${{ inputs.source_repo }}" ] && [ -d "source_to_scan" ]; then
+            SCAN_PATH="source_to_scan"
+            echo "🔍 Semgrep escaneando: ${{ inputs.source_repo }}"
+          else
+            echo "🔍 Semgrep escaneando: engine (source_repo no especificado)"
+          fi
+
+          echo "Usando reglas: $RULES | Path: $SCAN_PATH"
 
           semgrep \
             --config $RULES \
             --json \
             --output reports/semgrep_report.json \
             --timeout 300 \
-            --no-error . || true
+            --no-error "$SCAN_PATH" || true
 
           if [ ! -f reports/semgrep_report.json ] || [ ! -s reports/semgrep_report.json ]; then
             echo '{"results":[],"errors":[],"version":"1.0"}' > reports/semgrep_report.json
@@ -183,6 +279,15 @@ jobs:
           echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main \
             | sudo tee -a /etc/apt/sources.list.d/trivy.list
           sudo apt-get update && sudo apt-get install -y trivy
+
+      # Login a GHCR si hay token (para imágenes privadas)
+      - name: Login GHCR (imágenes privadas)
+        if: ${{ secrets.GHCR_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
@@ -256,6 +361,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Login a GHCR si hay token
+      - name: Login GHCR (imágenes privadas)
+        if: ${{ secrets.GHCR_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -268,10 +382,28 @@ jobs:
 
       - name: Start target app
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        env:
+          APP_SECRETS: ${{ secrets.APP_SECRETS }}
         run: |
           docker rm -f target-app 2>/dev/null || true
+
+          # Construir flags -e para cada variable de APP_SECRETS
+          # Formato esperado: "KEY1=val1,KEY2=val2,KEY3=val3"
+          ENV_FLAGS=""
+          if [ -n "$APP_SECRETS" ]; then
+            IFS=',' read -ra VARS <<< "$APP_SECRETS"
+            for VAR in "${VARS[@]}"; do
+              VAR_TRIMMED=$(echo "$VAR" | xargs)
+              if [ -n "$VAR_TRIMMED" ]; then
+                ENV_FLAGS="$ENV_FLAGS -e $VAR_TRIMMED"
+              fi
+            done
+            echo "🔑 Inyectando $(echo $APP_SECRETS | tr ',' '\n' | wc -l) variables de entorno"
+          fi
+
           docker run -d --name target-app \
             -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
+            $ENV_FLAGS \
             ${{ inputs.target_image }}
 
           echo "Esperando app en localhost:${{ inputs.target_port }}..."
@@ -284,8 +416,8 @@ jobs:
               echo "✅ App lista (HTTP $STATUS)"; break
             fi
             if [ "$i" = "40" ]; then
-              echo "⚠️ App no respondió — continuando de todas formas"
-              docker logs target-app --tail 20 || true
+              echo "⚠️ App no respondió tras 200s — continuando de todas formas"
+              docker logs target-app --tail 30 || true
             fi
             sleep 5
           done
@@ -336,13 +468,12 @@ jobs:
               d = json.load(open('reports/recon_context.json'))
               if not d.get('nuclei_targets'):
                   d['nuclei_targets'] = ['$TARGET']
-                  print('⚠️ nuclei_targets vacío — usando target base')
-              assert d.get('schema_version'), 'schema_version faltante'
+              assert d.get('schema_version')
               with open('reports/recon_context.json', 'w') as f:
                   json.dump(d, f, indent=2)
               print(f'✅ recon_context válido: {len(d[\"nuclei_targets\"])} targets')
           except Exception as e:
-              print(f'⚠️ Regenerando recon_context mínimo: {e}')
+              print(f'⚠️ Regenerando recon_context: {e}')
               fallback = {
                   'schema_version': '1.0',
                   'target_url': '$TARGET',
@@ -378,6 +509,14 @@ jobs:
           repository: ManuelArango1229/devsecops-engine-
           ref: main
 
+      - name: Login GHCR (imágenes privadas)
+        if: ${{ secrets.GHCR_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -390,10 +529,24 @@ jobs:
 
       - name: Start target app
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        env:
+          APP_SECRETS: ${{ secrets.APP_SECRETS }}
         run: |
           docker rm -f target-app 2>/dev/null || true
+
+          ENV_FLAGS=""
+          if [ -n "$APP_SECRETS" ]; then
+            IFS=',' read -ra VARS <<< "$APP_SECRETS"
+            for VAR in "${VARS[@]}"; do
+              VAR_TRIMMED=$(echo "$VAR" | xargs)
+              [ -n "$VAR_TRIMMED" ] && ENV_FLAGS="$ENV_FLAGS -e $VAR_TRIMMED"
+            done
+            echo "🔑 Inyectando variables de entorno para ZAP"
+          fi
+
           docker run -d --name target-app \
             -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
+            $ENV_FLAGS \
             ${{ inputs.target_image }}
 
           echo "Esperando app en localhost:${{ inputs.target_port }}..."
@@ -407,7 +560,7 @@ jobs:
             fi
             if [ "$i" = "40" ]; then
               echo "⚠️ App no respondió — continuando de todas formas"
-              docker logs target-app --tail 20 || true
+              docker logs target-app --tail 30 || true
             fi
             sleep 5
           done
@@ -470,6 +623,14 @@ jobs:
           repository: ManuelArango1229/devsecops-engine-
           ref: main
 
+      - name: Login GHCR (imágenes privadas)
+        if: ${{ secrets.GHCR_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -482,10 +643,24 @@ jobs:
 
       - name: Start target app
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+        env:
+          APP_SECRETS: ${{ secrets.APP_SECRETS }}
         run: |
           docker rm -f target-app 2>/dev/null || true
+
+          ENV_FLAGS=""
+          if [ -n "$APP_SECRETS" ]; then
+            IFS=',' read -ra VARS <<< "$APP_SECRETS"
+            for VAR in "${VARS[@]}"; do
+              VAR_TRIMMED=$(echo "$VAR" | xargs)
+              [ -n "$VAR_TRIMMED" ] && ENV_FLAGS="$ENV_FLAGS -e $VAR_TRIMMED"
+            done
+            echo "🔑 Inyectando variables de entorno para Nuclei"
+          fi
+
           docker run -d --name target-app \
             -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
+            $ENV_FLAGS \
             ${{ inputs.target_image }}
 
           echo "Esperando app en localhost:${{ inputs.target_port }}..."
@@ -499,7 +674,7 @@ jobs:
             fi
             if [ "$i" = "40" ]; then
               echo "⚠️ App no respondió — continuando de todas formas"
-              docker logs target-app --tail 20 || true
+              docker logs target-app --tail 30 || true
             fi
             sleep 5
           done
@@ -705,7 +880,6 @@ jobs:
           print('  CRITICAL:', s.get('by_severity', {}).get('CRITICAL', 0))
           print('  HIGH    :', s.get('by_severity', {}).get('HIGH', 0))
           print('  MEDIUM  :', s.get('by_severity', {}).get('MEDIUM', 0))
-          print('  LOW     :', s.get('by_severity', {}).get('LOW', 0))
           print('  By tool :', d.get('tools_executed', {}))
           "
 
