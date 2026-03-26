@@ -57,11 +57,6 @@ jobs:
       dast_enabled:  ${{ steps.detect.outputs.dast_enabled }}
       semgrep_rules: ${{ steps.detect.outputs.semgrep_rules }}
     steps:
-      # FIX DEFINITIVO: el engine se clona en ./engine
-      # El repo cliente NO se clona aquí — el detector analiza
-      # el engine mismo para detectar lenguaje del proyecto consumidor.
-      # Como juice-shop es una imagen Docker (no un repo clonado),
-      # se fuerza target_image para que scan_mode = "image".
       - name: Checkout ENGINE repo
         uses: actions/checkout@v4
         with:
@@ -89,9 +84,6 @@ jobs:
         run: |
           mkdir -p reports
 
-          # El detector analiza el directorio actual (el engine).
-          # Lo importante es que target_image/target_url estén correctos
-          # para que scan_mode quede en "image" o "url" — no "static".
           python3 scripts/detector.py \
             --path . \
             --output reports/scan_config.json \
@@ -101,7 +93,6 @@ jobs:
             --criticality  "${{ inputs.criticality }}" \
             --environment  "${{ inputs.environment }}"
 
-          # Validar que el JSON tiene todos los campos necesarios
           python3 -c "
           import json, sys
           d = json.load(open('reports/scan_config.json'))
@@ -193,7 +184,6 @@ jobs:
             | sudo tee -a /etc/apt/sources.list.d/trivy.list
           sudo apt-get update && sudo apt-get install -y trivy
 
-      # FIX: pull de la imagen SIEMPRE antes de escanear con imagen
       - name: Pull imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -205,7 +195,6 @@ jobs:
           fi
           echo "✅ Imagen lista: ${{ inputs.target_image }}"
 
-      # FIX: Trivy escanea la IMAGEN cuando target_image está definido
       - name: Run Trivy – imagen Docker
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -277,7 +266,6 @@ jobs:
             docker pull ${{ inputs.target_image }}
           fi
 
-      # FIX: health check con localhost
       - name: Start target app
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -302,7 +290,6 @@ jobs:
             sleep 5
           done
 
-      # FIX: target URL usa localhost, no ip route
       - name: Set target URL
         id: target
         run: |
@@ -312,7 +299,6 @@ jobs:
             echo "url=http://localhost:${{ inputs.target_port }}" >> $GITHUB_OUTPUT
           fi
 
-      # FIX: instalación por binario directo
       - name: Install recon tools
         run: |
           sudo apt-get install -y nmap curl wget unzip 2>/dev/null || true
@@ -341,7 +327,6 @@ jobs:
             --target "${{ steps.target.outputs.url }}" \
             --output reports/recon_context.json
 
-      # FIX: garantizar que nuclei_targets nunca esté vacío
       - name: Validar recon_context
         run: |
           TARGET="${{ steps.target.outputs.url }}"
@@ -403,7 +388,6 @@ jobs:
             docker pull ${{ inputs.target_image }}
           fi
 
-      # FIX: health check con localhost
       - name: Start target app
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -434,8 +418,6 @@ jobs:
           name: recon-context
           path: reports/
 
-      # FIX: --network host para que ZAP alcance localhost del runner
-      # FIX: target URL usa localhost, no ip route
       - name: Run ZAP Baseline
         run: |
           mkdir -p reports
@@ -498,7 +480,6 @@ jobs:
             docker pull ${{ inputs.target_image }}
           fi
 
-      # FIX: health check con localhost
       - name: Start target app
         if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
         run: |
@@ -541,7 +522,6 @@ jobs:
       - name: Update Nuclei templates
         run: nuclei -update-templates -silent || true
 
-      # FIX: target URL usa localhost, no ip route
       - name: Set target URL
         id: target
         run: |
@@ -556,7 +536,6 @@ jobs:
           mkdir -p reports
           TARGET="${{ steps.target.outputs.url }}"
 
-          # FIX: siempre tener al menos el target base
           python3 -c "
           import json
           try:
@@ -606,7 +585,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect, sast-semgrep, sca-trivy, dast-zap, pentest-nuclei, recon]
     if: always()
-    permissions:         
+    permissions:
       actions: read
       contents: read
     steps:
@@ -623,7 +602,7 @@ jobs:
       - name: Install Python deps
         run: pip install openai anthropic requests python-dotenv
 
-       - name: Download semgrep-report
+      - name: Download semgrep-report
         uses: actions/download-artifact@v4
         with:
           name: semgrep-report
@@ -679,6 +658,7 @@ jobs:
           [ -f reports/zap_report.json     ] || echo '{"site":[{"alerts":[]}]}'                   > reports/zap_report.json
           [ -f reports/nuclei_report.json  ] || echo '[]'                                         > reports/nuclei_report.json
           [ -f reports/recon_context.json  ] || echo '{"schema_version":"1.0","nuclei_targets":[],"summary":{}}' > reports/recon_context.json
+          [ -f reports/scan_config.json    ] || echo '{"schema_version":"1.0"}'                   > reports/scan_config.json
 
           echo "📁 Archivos en reports/:"
           ls -lah reports/
@@ -706,7 +686,6 @@ jobs:
           except Exception as e: print('  nuclei  : error -', e)
           "
 
-      # FIX: pasar SERVICE_NAME y ENVIRONMENT como env vars al normalizador
       - name: Normalize findings
         env:
           SERVICE_NAME:  ${{ inputs.service_name }}
@@ -777,7 +756,6 @@ jobs:
             reports/SECURITY_REPORT.md
           retention-days: 30
 
-      # FIX: enforce en step separado — el upload siempre ocurre aunque falle el gate
       - name: Security Gate enforce
         run: |
           python3 scripts/gate.py \
