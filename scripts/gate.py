@@ -142,7 +142,7 @@ def detect_empty_pipeline(findings_data: dict) -> bool:
 
 
 def run_gate(findings_path: str, ai_evaluation_path: str,
-             output_path: str, enforce: bool = False, criticality: str = "medium):
+             output_path: str, enforce: bool = False, criticality: str = "medium"):
 
     print("\n" + "="*60)
     print("  SECURITY GATE – DevSecOps TG")
