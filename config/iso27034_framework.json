@@ -1,0 +1,143 @@
+{
+  "_norma": "ISO/IEC 27034-1:2011 — Application Security",
+  "_descripcion": "Este archivo operacionaliza los conceptos de la norma ISO/IEC 27034 dentro del pipeline DevSecOps. Define el Application Normative Framework (ANF) con sus Application Security Controls (ASC), los niveles de confianza objetivo (TLOT) por criticidad, y el mapeo explícito entre controles normativos y herramientas del pipeline.",
+
+  "organization_normative_framework": {
+    "ref": "ISO/IEC 27034-1 §7.3.3",
+    "description": "Marco normativo de la organización que define las políticas de seguridad aplicables a todos los proyectos.",
+    "policies": [
+      "Todo software desplegado debe haber superado al menos SAST y SCA antes del despliegue.",
+      "Software de criticidad HIGH o CRITICAL debe superar también DAST y Pentesting automatizado.",
+      "Ningún hallazgo CRITICAL puede quedar sin evaluar en la decisión de despliegue.",
+      "La evaluación de seguridad debe ser reproducible y trazable (CI/CD automatizado)."
+    ]
+  },
+
+  "application_security_controls": {
+    "ref": "ISO/IEC 27034-1 §7.3.5 + Annex A",
+    "description": "Controles de seguridad específicos que implementa el pipeline. Cada ASC corresponde a una herramienta y fase del análisis.",
+    "controls": [
+      {
+        "asc_id": "ASC-SAST-001",
+        "name": "Static Application Security Testing",
+        "ref_iso": "ISO/IEC 27034-1 Annex A — Code Review Control",
+        "tool": "semgrep",
+        "tool_type": "SAST",
+        "description": "Análisis del código fuente para detectar patrones inseguros, inyecciones, y debilidades lógicas sin ejecutar la aplicación.",
+        "owasp_categories": ["A03:2021 – Injection", "A02:2021 – Cryptographic Failures", "A07:2021 – Identification and Authentication Failures"],
+        "trust_contribution": 0.20,
+        "mandatory_for": ["low", "medium", "high", "critical"]
+      },
+      {
+        "asc_id": "ASC-SCA-001",
+        "name": "Software Composition Analysis",
+        "ref_iso": "ISO/IEC 27034-1 Annex A — Third-Party Component Control",
+        "tool": "trivy",
+        "tool_type": "SCA",
+        "description": "Identificación de CVEs en dependencias de terceros y componentes de la imagen Docker.",
+        "owasp_categories": ["A06:2021 – Vulnerable and Outdated Components"],
+        "trust_contribution": 0.25,
+        "mandatory_for": ["low", "medium", "high", "critical"]
+      },
+      {
+        "asc_id": "ASC-DAST-001",
+        "name": "Dynamic Application Security Testing",
+        "ref_iso": "ISO/IEC 27034-1 Annex A — Dynamic Testing Control",
+        "tool": "zap",
+        "tool_type": "DAST",
+        "description": "Pruebas de seguridad sobre la aplicación en ejecución para detectar vulnerabilidades de configuración y runtime.",
+        "owasp_categories": ["A05:2021 – Security Misconfiguration", "A03:2021 – Injection", "A01:2021 – Broken Access Control"],
+        "trust_contribution": 0.25,
+        "mandatory_for": ["medium", "high", "critical"]
+      },
+      {
+        "asc_id": "ASC-PENTEST-001",
+        "name": "Automated Penetration Testing",
+        "ref_iso": "ISO/IEC 27034-1 Annex A — Penetration Testing Control",
+        "tool": "nuclei",
+        "tool_type": "PENTEST",
+        "description": "Validación activa de vulnerabilidades conocidas mediante templates de ataque automatizados.",
+        "owasp_categories": ["A01:2021 – Broken Access Control", "A03:2021 – Injection", "A10:2021 – Server-Side Request Forgery"],
+        "trust_contribution": 0.20,
+        "mandatory_for": ["medium", "high", "critical"]
+      },
+      {
+        "asc_id": "ASC-RECON-001",
+        "name": "Attack Surface Reconnaissance",
+        "ref_iso": "ISO/IEC 27034-1 Annex A — Security Assessment Control",
+        "tool": "recon",
+        "tool_type": "RECON",
+        "description": "Descubrimiento activo de la superficie de ataque: puertos, rutas, tecnologías, headers de seguridad.",
+        "owasp_categories": ["A05:2021 – Security Misconfiguration"],
+        "trust_contribution": 0.10,
+        "mandatory_for": ["medium", "high", "critical"]
+      }
+    ]
+  },
+
+  "target_levels_of_trust": {
+    "ref": "ISO/IEC 27034-1 §7.3.4",
+    "description": "El TLOT (Target Level of Trust) define el nivel mínimo de confianza requerido para aprobar el despliegue según la criticidad del servicio. Se expresa como un score 0.0–1.0.",
+    "levels": {
+      "low": {
+        "tlot_score": 0.50,
+        "description": "Servicios internos o de baja exposición. SAST y SCA obligatorios.",
+        "required_ascs": ["ASC-SAST-001", "ASC-SCA-001"],
+        "fail_on_critical": true,
+        "max_high_allowed": 10,
+        "max_medium_allowed": 50
+      },
+      "medium": {
+        "tlot_score": 0.65,
+        "description": "Servicios con exposición moderada o datos de usuarios. Las 4 técnicas obligatorias.",
+        "required_ascs": ["ASC-SAST-001", "ASC-SCA-001", "ASC-DAST-001", "ASC-PENTEST-001", "ASC-RECON-001"],
+        "fail_on_critical": true,
+        "max_high_allowed": 5,
+        "max_medium_allowed": 20
+      },
+      "high": {
+        "tlot_score": 0.80,
+        "description": "Servicios críticos de negocio con datos sensibles o financieros.",
+        "required_ascs": ["ASC-SAST-001", "ASC-SCA-001", "ASC-DAST-001", "ASC-PENTEST-001", "ASC-RECON-001"],
+        "fail_on_critical": true,
+        "max_high_allowed": 0,
+        "max_medium_allowed": 5
+      },
+      "critical": {
+        "tlot_score": 0.95,
+        "description": "Infraestructura crítica o datos altamente sensibles (salud, finanzas, identidad).",
+        "required_ascs": ["ASC-SAST-001", "ASC-SCA-001", "ASC-DAST-001", "ASC-PENTEST-001", "ASC-RECON-001"],
+        "fail_on_critical": true,
+        "max_high_allowed": 0,
+        "max_medium_allowed": 0
+      }
+    }
+  },
+
+  "alot_calculation": {
+    "ref": "ISO/IEC 27034-1 §7.3.4 — Actual Level of Trust",
+    "description": "El ALOT se calcula como la suma ponderada del trust_contribution de cada ASC ejecutado, penalizada por los hallazgos críticos/altos encontrados.",
+    "formula": "ALOT = sum(trust_contribution * execution_score per ASC) * (1 - penalty)",
+    "penalty_rules": [
+      {"condition": "critical_findings > 0", "penalty": 0.40, "description": "Hallazgos CRITICAL reducen significativamente la confianza"},
+      {"condition": "high_findings >= 5", "penalty": 0.25, "description": "5 o más hallazgos HIGH reducen la confianza"},
+      {"condition": "high_findings >= 1 and high_findings < 5", "penalty": 0.10, "description": "1-4 hallazgos HIGH reducen levemente la confianza"},
+      {"condition": "asc_not_executed", "penalty": 0.15, "description": "Cada ASC obligatorio no ejecutado reduce la confianza por ASC faltante"}
+    ]
+  },
+
+  "deployment_decision_matrix": {
+    "ref": "ISO/IEC 27034-1 §7.3.6 — Application Security Validation",
+    "description": "Matriz de decisión de despliegue basada en comparación ALOT vs TLOT.",
+    "rules": [
+      {"condition": "ALOT >= TLOT and critical == 0", "decision": "PASS", "label": "Nivel de confianza alcanzado"},
+      {"condition": "ALOT >= TLOT * 0.85 and critical == 0", "decision": "CONDITIONAL", "label": "Nivel de confianza parcial — remediación requerida"},
+      {"condition": "ALOT < TLOT * 0.85 or critical > 0", "decision": "FAIL", "label": "Nivel de confianza insuficiente — despliegue bloqueado"}
+    ]
+  },
+
+  "audit_trail": {
+    "ref": "ISO/IEC 27034-1 §7.3.7 — ASC Verification Report",
+    "description": "El reporte generado por report_generator.py constituye el registro de auditoría requerido por la norma, documentando los controles ejecutados, los hallazgos encontrados y la decisión de despliegue con su justificación."
+  }
+}

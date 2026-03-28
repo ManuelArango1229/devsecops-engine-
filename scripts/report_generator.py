@@ -9,6 +9,14 @@ import argparse
 import os
 from datetime import datetime
 
+try:
+    from iso27034 import generate_iso27034_report_section
+    ISO27034_AVAILABLE = True
+except ImportError:
+    ISO27034_AVAILABLE = False
+    def generate_iso27034_report_section(iso_result):
+        return ""
+
 SEVERITY_ICONS = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢", "INFO": "⚪"}
 DECISION_ICONS = {"PASS": "✅", "FAIL": "❌", "CONDITIONAL": "⚠️"}
 COVERAGE_ICONS = {"buena": "✅", "parcial": "🟡", "ninguna": "❌"}
@@ -69,7 +77,8 @@ TOOL_META = {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def sev_order(s):
-    return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"].index(s) if s in ["CRITICAL","HIGH","MEDIUM","LOW","INFO"] else 99
+    return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"].index(s) \
+        if s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] else 99
 
 def pct(part, total):
     return f"{part/total*100:.1f}%" if total else "0.0%"
@@ -79,12 +88,9 @@ def bar(part, total, width=20):
     return "█" * filled + "░" * (width - filled)
 
 def clean_html(text):
-    for tag in ["<p>","</p>","<ul>","</ul>","<li>","</li>","<br>","<br/>"]:
-        text = text.replace(tag, " " if tag in ["<p>","</p>","<li>"] else "")
+    for tag in ["<p>", "</p>", "<ul>", "</ul>", "<li>", "</li>", "<br>", "<br/>"]:
+        text = text.replace(tag, " " if tag in ["<p>", "</p>", "<li>"] else "")
     return text.strip()
-
-def format_severity_badge(sev):
-    return f"{SEVERITY_ICONS.get(sev,'⚪')} **{sev}**"
 
 
 # ── Secciones del reporte ─────────────────────────────────────────────────────
@@ -95,6 +101,7 @@ def section_header(findings_data, ai_eval_data, gate_data):
     timestamp      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     service        = findings_data.get("service", "unknown")
     environment    = findings_data.get("environment", "staging")
+    criticality    = findings_data.get("business_criticality", "medium")
     pipeline_run   = findings_data.get("pipeline_run", "local")
     ai_model       = ai_eval_data.get("ai_model", "N/A")
     tokens         = ai_eval_data.get("tokens_used", {})
@@ -111,11 +118,13 @@ def section_header(findings_data, ai_eval_data, gate_data):
 |---|---|
 | **Servicio** | `{service}` |
 | **Entorno** | `{environment}` |
+| **Criticidad de negocio** | `{criticality}` |
 | **Pipeline Run** | `{pipeline_run}` |
 | **Timestamp** | `{timestamp}` |
 | **Modelo IA** | `{ai_model}` |
 | **Tokens utilizados** | `{tokens.get('total', 0):,}` (prompt: {tokens.get('prompt',0):,} / completion: {tokens.get('completion',0):,}) |
 | **Versión del prompt** | `{ai_eval_data.get('prompt_version', '2.0')}` |
+| **ISO/IEC 27034** | `{'✅ Activo' if ISO27034_AVAILABLE else '⚠️ Módulo no disponible'}` |
 
 ---
 
@@ -137,6 +146,16 @@ def section_gate(gate_data, ai_eval_data):
     risk_level     = evaluation.get("risk_level", "N/A")
     fp_estimate    = evaluation.get("false_positive_estimate", "N/A")
 
+    # ISO 27034
+    iso            = gate_data.get("iso27034_evaluation", {})
+    iso_tlot       = iso.get("tlot", {}).get("tlot_score", "N/A")
+    iso_alot       = iso.get("alot", {}).get("alot_score", "N/A")
+    iso_compliant  = gate_data.get("iso27034_compliant", False)
+    iso_label      = iso.get("iso_label", "No evaluado")
+
+    iso_tlot_str  = f"`{iso_tlot:.3f}`" if isinstance(iso_tlot, float) else f"`{iso_tlot}`"
+    iso_alot_str  = f"`{iso_alot:.3f}`" if isinstance(iso_alot, float) else f"`{iso_alot}`"
+
     md = f"""---
 
 ## 🚦 Decisión Final del Security Gate
@@ -145,10 +164,13 @@ def section_gate(gate_data, ai_eval_data):
 |---|---|
 | **Decisión** | {decision_icon} **{final_decision}** |
 | **Fuente** | `{gate_data.get('decision_source', 'N/A')}` |
-| **Nivel de riesgo** | `{risk_level}` |
-| **Risk Score** | `{risk_score:.1f} / 10.0` |
+| **Nivel de riesgo (IA)** | `{risk_level}` |
+| **Risk Score (IA)** | `{risk_score:.1f} / 10.0` |
 | **Confianza IA** | `{confidence:.0%}` |
 | **Falsos positivos estimados** | `{fp_estimate}` |
+| **ISO/IEC 27034 — TLOT** | {iso_tlot_str} |
+| **ISO/IEC 27034 — ALOT** | {iso_alot_str} |
+| **ISO/IEC 27034 — Conformidad** | {'✅ Conforme' if iso_compliant else '❌ No conforme'} — {iso_label} |
 
 """
     conditions = gate_data.get("conditions_to_deploy", evaluation.get("conditions", []))
@@ -166,12 +188,11 @@ def section_gate(gate_data, ai_eval_data):
 
 
 def section_stats(summary, tools_executed):
-    by_sev   = summary.get("by_severity", {})
-    by_tool  = summary.get("by_tool", {})
-    total    = summary.get("total", 0)
-    by_cat   = summary.get("by_category", {})
+    by_sev  = summary.get("by_severity", {})
+    by_tool = summary.get("by_tool", {})
+    total   = summary.get("total", 0)
+    by_cat  = summary.get("by_category", {})
 
-    # Severidades
     sev_rows = ""
     for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
         count = by_sev.get(sev, 0)
@@ -179,7 +200,6 @@ def section_stats(summary, tools_executed):
         b     = bar(count, total, 15)
         sev_rows += f"| {SEVERITY_ICONS.get(sev)} {sev} | {count} | {p} | `{b}` |\n"
 
-    # Herramientas — raw vs dedup
     tool_rows = ""
     for tool in ["semgrep", "trivy", "zap", "nuclei"]:
         meta    = TOOL_META.get(tool, {})
@@ -193,7 +213,6 @@ def section_stats(summary, tools_executed):
             f"| {raw} | {dedup} | {removed} | {p_rm} | {status} |\n"
         )
 
-    # Top categorías OWASP
     cat_rows = ""
     sorted_cats = sorted(by_cat.items(), key=lambda x: x[1], reverse=True)
     for cat, count in sorted_cats[:5]:
@@ -227,7 +246,7 @@ def section_stats(summary, tools_executed):
 
 
 def section_dedup_explanation(tools_executed, summary):
-    by_tool = summary.get("by_tool", {})
+    by_tool     = summary.get("by_tool", {})
     total_raw   = sum(tools_executed.values())
     total_dedup = sum(by_tool.values())
     removed     = total_raw - total_dedup
@@ -241,11 +260,11 @@ def section_dedup_explanation(tools_executed, summary):
 
 """
     for tool in ["trivy", "zap", "nuclei", "semgrep"]:
-        meta    = TOOL_META.get(tool, {})
-        raw     = tools_executed.get(tool, 0)
-        dedup   = by_tool.get(tool, 0)
+        meta      = TOOL_META.get(tool, {})
+        raw       = tools_executed.get(tool, 0)
+        dedup     = by_tool.get(tool, 0)
         removed_t = raw - dedup
-        p_rm    = pct(removed_t, raw) if raw > 0 else "0%"
+        p_rm      = pct(removed_t, raw) if raw > 0 else "0%"
 
         md += f"### {meta.get('icon','')} {meta.get('name', tool)} — {meta.get('type','')}\n\n"
         md += f"- **Raw:** {raw} hallazgos detectados | **Únicos tras dedup:** {dedup} | **Removidos:** {removed_t} ({p_rm})\n"
@@ -256,55 +275,54 @@ def section_dedup_explanation(tools_executed, summary):
 
 
 def section_recon(recon_data):
-    if not recon_data or recon_data.get("schema_version") == "1.0" and not recon_data.get("target_url"):
+    if not recon_data or (
+        recon_data.get("schema_version") == "1.0" and not recon_data.get("target_url")
+    ):
         return ""
 
-    target_url  = recon_data.get("target_url", "N/A")
-    nmap        = recon_data.get("nmap", {})
-    routes      = recon_data.get("route_discovery", {})
-    fingerprint = recon_data.get("fingerprint", {})
-    waf         = recon_data.get("waf", {})
-    attack_surf = recon_data.get("attack_surface", {})
-    recon_sum   = recon_data.get("summary", {})
+    target_url      = recon_data.get("target_url", "N/A")
+    nmap            = recon_data.get("nmap", {})
+    routes          = recon_data.get("route_discovery", {})
+    fingerprint     = recon_data.get("fingerprint", {})
+    waf             = recon_data.get("waf", {})
+    attack_surf     = recon_data.get("attack_surface", {})
+    recon_sum       = recon_data.get("summary", {})
 
-    open_ports  = recon_sum.get("open_ports", [])
-    technologies = recon_sum.get("technologies", [])
-    missing_hdrs = recon_sum.get("missing_security_headers", [])
-    discovered   = recon_sum.get("discovered_routes_count", 0)
-    waf_present  = recon_sum.get("waf_present", False)
+    open_ports      = recon_sum.get("open_ports", [])
+    technologies    = recon_sum.get("technologies", [])
+    missing_hdrs    = recon_sum.get("missing_security_headers", [])
+    waf_present     = recon_sum.get("waf_present", False)
     attack_findings = attack_surf.get("findings", [])
 
-    # Tabla de puertos
-    ports_table = ""
     services = nmap.get("services", {})
     if services:
         ports_table = "| Puerto | Servicio | Versión | Interesante |\n|---|---|---|---|\n"
         for port, info in services.items():
-            interesting = "⚠️ Sí" if info.get("interesting") else "No"
+            interesting  = "⚠️ Sí" if info.get("interesting") else "No"
             ports_table += f"| `{port}` | {info.get('service','?')} | {info.get('version','N/A')[:40]} | {interesting} |\n"
     else:
         ports_table = f"_Puerto {open_ports[0] if open_ports else 'N/A'} detectado (nmap no disponible o bloqueado en CI)_\n"
 
-    # Rutas descubiertas
-    discovered_routes = routes.get("discovered_routes", [])
+    discovered_routes  = routes.get("discovered_routes", [])
     interesting_routes = routes.get("interesting_routes", [])
 
-    routes_section = ""
     if discovered_routes:
-        routes_section = f"Se descubrieron **{len(discovered_routes)} rutas** activas. "
+        routes_section  = f"Se descubrieron **{len(discovered_routes)} rutas** activas. "
         routes_section += f"De estas, **{len(interesting_routes)} son de interés** (retornaron 200/201).\n\n"
         if interesting_routes:
             routes_section += "| Ruta sensible | Estado |\n|---|---|\n"
             for r in interesting_routes[:15]:
-                flag = "⚠️" if any(k in r.lower() for k in ["admin","env","git","backup","debug","actuator","swagger","api-docs","metrics"]) else "ℹ️"
+                flag = "⚠️" if any(
+                    k in r.lower() for k in
+                    ["admin","env","git","backup","debug","actuator","swagger","api-docs","metrics"]
+                ) else "ℹ️"
                 routes_section += f"| `{r}` | {flag} Accesible |\n"
     else:
         routes_section = "_No se ejecutó descubrimiento de rutas (ffuf/gobuster no disponible)._\n"
 
-    # Headers faltantes
-    present_hdrs = fingerprint.get("security_headers", {}).get("present", [])
+    present_hdrs  = fingerprint.get("security_headers", {}).get("present", [])
     headers_table = "| Header de Seguridad | Estado |\n|---|---|\n"
-    all_headers = [
+    all_headers   = [
         "content-security-policy", "strict-transport-security",
         "x-frame-options", "x-content-type-options",
         "referrer-policy", "permissions-policy",
@@ -318,13 +336,15 @@ def section_recon(recon_data):
         else:
             headers_table += f"| `{h}` | ⚪ No verificado |\n"
 
-    # Hallazgos de superficie de ataque
-    attack_section = ""
     if attack_findings:
-        attack_section = "| Severidad | Tipo | Detalle |\n|---|---|---|\n"
+        attack_section  = "| Severidad | Tipo | Detalle |\n|---|---|---|\n"
         for f in attack_findings:
             icon = SEVERITY_ICONS.get(f.get("severity","INFO"), "⚪")
-            attack_section += f"| {icon} {f.get('severity')} | `{f.get('type','')}` | {f.get('detail','')[:100]} |\n"
+            attack_section += (
+                f"| {icon} {f.get('severity')} "
+                f"| `{f.get('type','')}` "
+                f"| {f.get('detail','')[:100]} |\n"
+            )
     else:
         attack_section = "_No se identificaron hallazgos en la superficie de ataque._\n"
 
@@ -373,12 +393,18 @@ def section_ai_analysis(evaluation, ai_eval_data):
     blind_spots = coverage.get("blind_spots", [])
     owasp       = evaluation.get("owasp_top10_present", [])
 
-    owasp_rows = "\n".join(f"- `{cat}`" for cat in owasp) if owasp else "- _No se identificaron categorías específicas_"
+    owasp_rows = (
+        "\n".join(f"- `{cat}`" for cat in owasp)
+        if owasp else
+        "- _No se identificaron categorías específicas_"
+    )
 
-    cov_rows = f"""| SAST – Código fuente | {coverage.get('sast_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('sast_coverage',''),'❓')} |
-| SCA – Dependencias | {coverage.get('sca_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('sca_coverage',''),'❓')} |
-| DAST – Tiempo de ejecución | {coverage.get('dast_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('dast_coverage',''),'❓')} |
-| Pentesting automatizado | {coverage.get('pentest_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('pentest_coverage',''),'❓')} |"""
+    cov_rows = (
+        f"| SAST – Código fuente | {coverage.get('sast_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('sast_coverage',''),'❓')} |\n"
+        f"| SCA – Dependencias | {coverage.get('sca_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('sca_coverage',''),'❓')} |\n"
+        f"| DAST – Tiempo de ejecución | {coverage.get('dast_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('dast_coverage',''),'❓')} |\n"
+        f"| Pentesting automatizado | {coverage.get('pentest_coverage','N/A')} | {COVERAGE_ICONS.get(coverage.get('pentest_coverage',''),'❓')} |"
+    )
 
     blind_md = ""
     if blind_spots:
@@ -387,9 +413,7 @@ def section_ai_analysis(evaluation, ai_eval_data):
             blind_md += f"- {bs}\n"
         blind_md += "\n"
 
-    # Hallazgos principales IA
     key_findings = evaluation.get("key_findings", [])
-    kf_rows = ""
     if key_findings:
         kf_rows = "| Severidad | Hallazgo | CVSS | Explotable remoto | Auth requerida | Exploit público | Categoría |\n|---|---|---|---|---|---|---|\n"
         for f in key_findings:
@@ -458,7 +482,7 @@ _No se identificaron cadenas de ataque combinadas._
         icon       = SEVERITY_ICONS.get(chain.get("severity"), "⚪")
         likelihood = likelihood_map.get(chain.get("likelihood",""), chain.get("likelihood","N/A"))
         md += f"### {icon} {chain.get('chain_id','CHAIN')} – {chain.get('title','Sin título')}\n\n"
-        md += f"| Campo | Valor |\n|---|---|\n"
+        md += "| Campo | Valor |\n|---|---|\n"
         md += f"| **Severidad combinada** | {chain.get('severity','N/A')} |\n"
         md += f"| **Probabilidad** | {likelihood} |\n"
         md += f"| **Vulnerabilidades involucradas** | `{'`, `'.join(chain.get('finding_ids', []))}` |\n\n"
@@ -487,61 +511,85 @@ _No se identificaron prioridades específicas._
     if immediate:
         md += f"### 🚨 Inmediato (0–7 días) — {len(immediate)} acciones\n\n"
         for r in immediate:
-            fix    = f" → Fix: `{r.get('fix_version')}`" if r.get("fix_version") else ""
-            md += f"**{r.get('priority','?')}.** {r.get('action','N/A')}{fix}\n"
-            md += f"   - `{r.get('tool','N/A')}` | Esfuerzo: _{r.get('effort','N/A')}_ | Fix disponible: {'✅' if r.get('fix_available') else '❌'}\n\n"
+            fix  = f" → Fix: `{r.get('fix_version')}`" if r.get("fix_version") else ""
+            md  += f"**{r.get('priority','?')}.** {r.get('action','N/A')}{fix}\n"
+            md  += f"   - `{r.get('tool','N/A')}` | Esfuerzo: _{r.get('effort','N/A')}_ | Fix disponible: {'✅' if r.get('fix_available') else '❌'}\n\n"
+
     if short:
         md += f"### ⚡ Corto plazo (1–4 semanas) — {len(short)} acciones\n\n"
         for r in short:
-            fix = f" → Fix: `{r.get('fix_version')}`" if r.get("fix_version") else ""
-            md += f"**{r.get('priority','?')}.** {r.get('action','N/A')}{fix}\n"
-            md += f"   - `{r.get('tool','N/A')}` | Esfuerzo: _{r.get('effort','N/A')}_ | Fix disponible: {'✅' if r.get('fix_available') else '❌'}\n\n"
+            fix  = f" → Fix: `{r.get('fix_version')}`" if r.get("fix_version") else ""
+            md  += f"**{r.get('priority','?')}.** {r.get('action','N/A')}{fix}\n"
+            md  += f"   - `{r.get('tool','N/A')}` | Esfuerzo: _{r.get('effort','N/A')}_ | Fix disponible: {'✅' if r.get('fix_available') else '❌'}\n\n"
+
     if long_:
         md += f"### 🔧 Largo plazo (1–3 meses) — {len(long_)} acciones\n\n"
         for r in long_:
             md += f"**{r.get('priority','?')}.** {r.get('action','N/A')}\n"
             md += f"   - `{r.get('tool','N/A')}` | Esfuerzo: _{r.get('effort','N/A')}_\n\n"
+
     return md
 
 
-def section_gate_comparison(gate_comparison, ai_eval_data):
-    trad     = gate_comparison.get("traditional", {})
-    ai       = gate_comparison.get("ai_assisted", {})
-    analysis = gate_comparison.get("analysis", {})
+def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
+    """
+    Comparación de los TRES gates: tradicional, IA e ISO/IEC 27034.
+    Esta es la contribución académica central del TG.
+    """
+    trad       = gate_comparison.get("traditional", {})
+    ai         = gate_comparison.get("ai_assisted", {})
+    analysis   = gate_comparison.get("analysis", {})
     evaluation = ai_eval_data.get("evaluation", {})
+    iso        = gate_data.get("iso27034_evaluation", {})
 
     trad_decision = trad.get("decision", "UNKNOWN")
     ai_decision   = ai.get("decision", "UNKNOWN")
-    trad_icon     = DECISION_ICONS.get(trad_decision, "❓")
-    ai_icon       = DECISION_ICONS.get(ai_decision, "❓")
+    iso_decision  = iso.get("decision", "N/A")
+
+    trad_icon = DECISION_ICONS.get(trad_decision, "❓")
+    ai_icon   = DECISION_ICONS.get(ai_decision, "❓")
+    iso_icon  = DECISION_ICONS.get(iso_decision, "❓")
+
+    iso_tlot = iso.get("tlot", {}).get("tlot_score", 0)
+    iso_alot = iso.get("alot", {}).get("alot_score", 0)
+    iso_gap  = iso.get("gap_pct", 0)
+
+    iso_tlot_str = f"`{iso_tlot:.3f}`" if isinstance(iso_tlot, float) else "`N/A`"
+    iso_alot_str = f"`{iso_alot:.3f}`" if isinstance(iso_alot, float) else "`N/A`"
 
     trad_reasons = "\n".join(f"- {r}" for r in trad.get("reasons", []))
+    iso_reasoning = iso.get("reasoning", "No evaluado")
 
     return f"""---
 
-## 🔄 Comparación: Gate Tradicional vs Gate Asistido por IA
+## 🔄 Comparación: Tres Enfoques de Security Gate
 
-> **Contribución central del Trabajo de Grado:** demostrar que la evaluación asistida por IA
-> aporta valor diferencial sobre los umbrales estáticos mediante análisis contextual,
-> detección de explotabilidad real y cadenas de ataque.
+> **Contribución central del Trabajo de Grado:** comparar empíricamente tres mecanismos de
+> decisión de despliegue para demostrar el valor diferencial del análisis contextual (IA)
+> y la validación normativa (ISO/IEC 27034) sobre los umbrales estáticos tradicionales.
 
-| Criterio | Gate Tradicional | Gate con IA |
-|---|---|---|
-| **Decisión** | {trad_icon} {trad_decision} | {ai_icon} {ai_decision} |
-| **Método** | Umbrales estáticos | Evaluación contextual LLM |
-| **Considera contexto de negocio** | ❌ No | ✅ Sí |
-| **Filtra falsos positivos** | ❌ No | ✅ Estimados ({evaluation.get('false_positive_estimate','N/A')}) |
-| **Evalúa explotabilidad real** | ❌ No | ✅ Sí |
-| **Detecta cadenas de ataque** | ❌ No | ✅ Sí |
-| **Documenta blind spots** | ❌ No | ✅ Sí |
-| **Traduce a impacto de negocio** | ❌ No | ✅ Sí |
-| **Priorización contextual** | ❌ No | ✅ Sí |
-| **Modelo / método** | Reglas fijas | `{ai.get('ai_model','N/A')}` |
-| **Nivel de confianza** | N/A (determinístico) | {ai.get('confidence',0):.0%} |
+| Criterio | Gate Tradicional | Gate con IA | Gate ISO/IEC 27034 |
+|---|---|---|---|
+| **Decisión** | {trad_icon} {trad_decision} | {ai_icon} {ai_decision} | {iso_icon} {iso_decision} |
+| **Método** | Umbrales numéricos fijos | Evaluación contextual LLM | Modelo TLOT/ALOT normativo |
+| **TLOT / ALOT** | N/A | N/A | {iso_tlot_str} / {iso_alot_str} |
+| **Brecha normativa** | N/A | N/A | {iso_gap:.1f}% |
+| **Fundamento** | Conteo de hallazgos | Evaluación semántica | ISO/IEC 27034-1 §7.3.6 |
+| **Considera falsos positivos** | ❌ No | ✅ Estimados ({evaluation.get('false_positive_estimate','N/A')}) | ❌ No |
+| **Evalúa explotabilidad real** | ❌ No | ✅ Sí | ❌ No |
+| **Detecta cadenas de ataque** | ❌ No | ✅ Sí | ❌ No |
+| **Documenta blind spots** | ❌ No | ✅ Sí | ❌ No |
+| **Transparencia/Trazabilidad** | ✅ Alta | ⚠️ Baja (caja negra) | ✅ Alta (fórmula explícita) |
+| **Determinístico** | ✅ Sí | ❌ No | ✅ Sí |
+| **Costo computacional** | Nulo | ~$0.005/run | Nulo |
+| **Modelo / versión** | Reglas fijas | `{ai.get('ai_model','N/A')}` | ISO/IEC 27034-1:2011 |
+| **Confianza / score** | N/A (determinístico) | {ai.get('confidence',0):.0%} | ALOT={iso_alot_str} |
 
-**Análisis:** {analysis.get('comparison','N/A')}
+**Análisis de la comparación:** {analysis.get('comparison','N/A')}
 
 **Insight académico:** {analysis.get('academic_insight','N/A')}
+
+**Razonamiento ISO/IEC 27034:** {iso_reasoning}
 
 **Razones del gate tradicional:**
 {trad_reasons}
@@ -551,18 +599,37 @@ def section_gate_comparison(gate_comparison, ai_eval_data):
 """
 
 
+def section_iso27034(gate_data):
+    """
+    Sección de conformidad normativa ISO/IEC 27034.
+    Generada por iso27034.py si está disponible.
+    """
+    iso_result = gate_data.get("iso27034_evaluation", {})
+    if not iso_result:
+        return ""
+    if not ISO27034_AVAILABLE:
+        return """---
+
+## 📋 Evaluación de Conformidad ISO/IEC 27034
+
+> ⚠️ El módulo `iso27034.py` no está disponible. Instálalo en `scripts/` para activar la validación normativa.
+
+"""
+    return generate_iso27034_report_section(iso_result)
+
+
 def section_findings_detail(findings, tools_executed):
     """Sección detallada por herramienta con todos los hallazgos."""
 
     def finding_card(f):
-        icon = SEVERITY_ICONS.get(f.get("severity"), "⚪")
-        sev  = f.get("severity", "?")
+        icon  = SEVERITY_ICONS.get(f.get("severity"), "⚪")
+        sev   = f.get("severity", "?")
         title = f.get("title", "Unknown")
-        md  = f"#### {icon} [{sev}] {title}\n\n"
-        md += f"| Campo | Valor |\n|---|---|\n"
-        md += f"| **ID** | `{f.get('id','N/A')}` |\n"
-        md += f"| **Herramienta** | `{f.get('tool','N/A').upper()}` ({f.get('tool_type','N/A')}) |\n"
-        md += f"| **Categoría OWASP** | {f.get('category','N/A')} |\n"
+        md    = f"#### {icon} [{sev}] {title}\n\n"
+        md   += "| Campo | Valor |\n|---|---|\n"
+        md   += f"| **ID** | `{f.get('id','N/A')}` |\n"
+        md   += f"| **Herramienta** | `{f.get('tool','N/A').upper()}` ({f.get('tool_type','N/A')}) |\n"
+        md   += f"| **Categoría OWASP** | {f.get('category','N/A')} |\n"
         if f.get("cwe"):
             md += f"| **CWE** | `{f.get('cwe')}` |\n"
         if f.get("cvss_score"):
@@ -572,7 +639,7 @@ def section_findings_detail(findings, tools_executed):
             md += f"| **Archivo** | `{loc['file']}:{loc.get('line','?')}` |\n"
         if loc.get("endpoint"):
             md += f"| **Endpoint** | `{loc.get('method','GET')} {loc['endpoint']}` |\n"
-        if f.get("instances_count") and f.get("instances_count",0) > 1:
+        if f.get("instances_count") and f.get("instances_count", 0) > 1:
             md += f"| **Instancias** | {f.get('instances_count')} URLs afectadas |\n"
         md += f"\n**Descripción:** {f.get('description','N/A')[:400]}\n\n"
         if f.get("evidence") and f.get("evidence","").strip():
@@ -585,11 +652,11 @@ def section_findings_detail(findings, tools_executed):
     md = "---\n\n## 📋 Hallazgos Detallados por Herramienta\n\n"
 
     for tool_key in ["trivy", "zap", "nuclei", "semgrep"]:
-        meta     = TOOL_META.get(tool_key, {})
+        meta          = TOOL_META.get(tool_key, {})
         tool_findings = [f for f in findings if f.get("tool") == tool_key]
-        raw      = tools_executed.get(tool_key, 0)
-        unique   = len(tool_findings)
-        removed  = raw - unique
+        raw           = tools_executed.get(tool_key, 0)
+        unique        = len(tool_findings)
+        removed       = raw - unique
 
         md += f"### {meta.get('icon','')} {meta.get('name', tool_key)}\n\n"
         md += f"> **Tipo:** {meta.get('type','')}  \n"
@@ -599,38 +666,35 @@ def section_findings_detail(findings, tools_executed):
             md += "_No se encontraron hallazgos para esta herramienta._\n\n"
             continue
 
-        # Conteo por severidad
         sev_count = {}
         for f in tool_findings:
-            s = f.get("severity","INFO")
-            sev_count[s] = sev_count.get(s,0) + 1
+            s = f.get("severity", "INFO")
+            sev_count[s] = sev_count.get(s, 0) + 1
 
         sev_line = " | ".join(
             f"{SEVERITY_ICONS.get(s,'')} {s}: **{sev_count[s]}**"
             for s in ["CRITICAL","HIGH","MEDIUM","LOW","INFO"]
-            if sev_count.get(s,0) > 0
+            if sev_count.get(s, 0) > 0
         )
         md += f"**Distribución:** {sev_line}\n\n"
 
-        # CRÍTICOS Y ALTOS con detalle completo
         critical_high = [f for f in tool_findings if f.get("severity") in ["CRITICAL","HIGH"]]
         if critical_high:
             md += f"#### 🔴🟠 Críticos y Altos ({len(critical_high)})\n\n"
             for f in sorted(critical_high, key=lambda x: sev_order(x.get("severity","INFO"))):
                 md += finding_card(f)
 
-        # MEDIOS, BAJOS E INFO en tabla compacta
         medium_low = [f for f in tool_findings if f.get("severity") in ["MEDIUM","LOW","INFO"]]
         if medium_low:
             md += f"#### 🟡🟢⚪ Medios, Bajos e Info ({len(medium_low)})\n\n"
             if tool_key == "trivy":
-                md += "| Severidad | CVE / Advisory | Paquete | CVSS | Remediación |\n|---|---|---|---|---|\n"
+                md += "| Severidad | CVE / Advisory | CVSS | Remediación |\n|---|---|---|---|\n"
                 for f in sorted(medium_low, key=lambda x: sev_order(x.get("severity","INFO"))):
                     icon  = SEVERITY_ICONS.get(f.get("severity"),"⚪")
                     title = f.get("title","N/A")[:55]
                     cvss  = f.get("cvss_score","N/A")
                     rem   = f.get("remediation","Ver advisory")[:70]
-                    md += f"| {icon} {f.get('severity')} | {title} | {cvss} | {rem} |\n"
+                    md   += f"| {icon} {f.get('severity')} | {title} | {cvss} | {rem} |\n"
                 md += "\n"
             else:
                 md += "| Severidad | Hallazgo | Endpoint | Remediación |\n|---|---|---|---|\n"
@@ -660,37 +724,39 @@ Trabajo de Grado en la **Universidad del Valle – Sede Tuluá**.
 
 | Estándar / Framework | Aplicación en este pipeline |
 |---|---|
-| **ISO/IEC 27034** | Principios de seguridad de aplicaciones — gobierno del pipeline |
+| **ISO/IEC 27034-1:2011** | Modelo TLOT/ALOT para la decisión de despliegue |
 | **OWASP Top 10 (2021)** | Categorización de todos los hallazgos normalizados |
-| **CVSS v3.1** | Puntuación de severidad para hallazgos de Trivy |
+| **CVSS v3.1 (NIST)** | Puntuación de severidad para hallazgos de Trivy |
 | **CWE/SANS Top 25** | Clasificación de debilidades en SAST y DAST |
 | **MITRE ATT&CK** | Referencia para cadenas de ataque identificadas por la IA |
+| **ISO/IEC 27005:2022** | Base para la calibración de niveles TLOT por criticidad |
 
 ### Herramientas integradas en el pipeline
 
-| Herramienta | Tipo | Propósito principal | Hallazgos únicos |
+| Herramienta | Tipo | ASC ISO/IEC 27034 | Hallazgos únicos |
 |---|---|---|---|
-| Semgrep | SAST | Análisis estático del código fuente | {tools.get('semgrep',0)} |
-| Trivy | SCA | Vulnerabilidades en dependencias de la imagen Docker | {tools.get('trivy',0)} |
-| OWASP ZAP | DAST | Escaneo dinámico de la aplicación en ejecución | {tools.get('zap',0)} |
-| Nuclei | Pentesting | Validación activa con templates de vulnerabilidades conocidas | {tools.get('nuclei',0)} |
+| Semgrep | SAST | ASC-SAST-001 | {tools.get('semgrep',0)} |
+| Trivy | SCA | ASC-SCA-001 | {tools.get('trivy',0)} |
+| OWASP ZAP | DAST | ASC-DAST-001 | {tools.get('zap',0)} |
+| Nuclei | Pentesting | ASC-PENTEST-001 | {tools.get('nuclei',0)} |
 
-### Contribución diferencial del componente IA
+### Contribución diferencial por tipo de gate
 
-| Capacidad | Gate Tradicional | Gate con IA | Impacto académico |
+| Capacidad | Gate Tradicional | Gate con IA | Gate ISO/IEC 27034 |
 |---|---|---|---|
-| Detección de falsos positivos | ❌ | ✅ | Reduce ruido en la decisión |
-| Análisis de explotabilidad real | ❌ | ✅ | Priorización basada en riesgo real |
-| Cadenas de ataque | ❌ | ✅ | {chains} cadenas identificadas en este run |
-| Blind spots de cobertura | ❌ | ✅ | Documenta qué no cubre el pipeline |
-| Impacto de negocio | ❌ | ✅ | Traduce CVEs a términos ejecutivos |
-| Priorización contextual | ❌ | ✅ | Ordena por urgencia real, no solo por CVSS |
+| Detección de falsos positivos | ❌ | ✅ | ❌ |
+| Análisis de explotabilidad real | ❌ | ✅ | ❌ |
+| Cadenas de ataque ({chains} en este run) | ❌ | ✅ | ❌ |
+| Blind spots de cobertura | ❌ | ✅ | ❌ |
+| Fundamento normativo trazable | ❌ | ❌ | ✅ |
+| Modelo de confianza (TLOT/ALOT) | ❌ | ❌ | ✅ |
+| Impacto de negocio | ❌ | ✅ | ❌ |
 
 ### Limitaciones del estudio
 
-- Pipeline ejecutado en entorno de laboratorio con OWASP Juice Shop (aplicación intencionalmente vulnerable)
-- La evaluación IA utiliza LLaMA 3.3 70B vía Groq y requiere validación humana para decisiones en producción
-- Semgrep analiza el código del engine (no el de Juice Shop) ya que la app target se consume como imagen Docker
+- Pipeline validado sobre OWASP Juice Shop y FitFusion Backend (n=2 casos de estudio)
+- Los valores TLOT son una interpretación cuantitativa propia de la norma, no valores prescritos por ISO/IEC 27034-1:2011
+- La evaluación IA requiere validación humana para decisiones en producción
 - No reemplaza una auditoría de seguridad formal ni un pentest manual
 
 ---
@@ -730,7 +796,7 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     pipeline_run    = findings_data.get("pipeline_run", "local")
     by_tool_dedup   = summary.get("by_tool", {})
 
-    report = ""
+    report  = ""
     report += section_header(findings_data, ai_eval_data, gate_data)
     report += section_gate(gate_data, ai_eval_data)
     report += section_stats(summary, tools_executed)
@@ -739,11 +805,15 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     report += section_ai_analysis(evaluation, ai_eval_data)
     report += section_attack_chains(attack_chains)
     report += section_remediation(evaluation.get("remediation_priorities", []))
-    report += section_gate_comparison(gate_comparison, ai_eval_data)
+    report += section_gate_comparison(gate_comparison, ai_eval_data, gate_data)
+    report += section_iso27034(gate_data)
     report += section_findings_detail(findings, tools_executed)
     report += section_academic(timestamp, pipeline_run, attack_chains, by_tool_dedup)
 
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    os.makedirs(
+        os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
+        exist_ok=True
+    )
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report)
 
@@ -752,17 +822,18 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     print(f"  📄 Tamaño         : {len(report):,} caracteres")
     print(f"  🔗 Cadenas ataque : {len(attack_chains)}")
     print(f"  🚦 Decisión       : {gate_data.get('decision','UNKNOWN')}")
+    print(f"  📋 ISO/IEC 27034  : {'✅ incluido' if ISO27034_AVAILABLE else '⚠️ módulo no disponible'}")
     print(f"  📊 Hallazgos      : {total_findings} únicos de {sum(tools_executed.values())} raw")
     print("="*60 + "\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--findings",       required=True)
-    parser.add_argument("--ai-evaluation",  required=True)
-    parser.add_argument("--gate-decision",  required=True)
-    parser.add_argument("--output",         required=True)
-    parser.add_argument("--recon",          default=None,
+    parser.add_argument("--findings",      required=True)
+    parser.add_argument("--ai-evaluation", required=True)
+    parser.add_argument("--gate-decision", required=True)
+    parser.add_argument("--output",        required=True)
+    parser.add_argument("--recon",         default=None,
                         help="Ruta opcional a recon_context.json")
     args = parser.parse_args()
 

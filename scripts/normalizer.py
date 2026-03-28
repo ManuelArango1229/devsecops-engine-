@@ -439,6 +439,7 @@ def normalize(semgrep_path, trivy_path, zap_path, nuclei_path, output_path):
         "pipeline_run":   os.environ.get('GITHUB_RUN_ID', 'local'),
         "environment":    os.environ.get('ENVIRONMENT', 'staging'),
         "service":        os.environ.get('SERVICE_NAME', 'unknown'),
+        "business_criticality": os.environ.get('CRITICALITY', 'medium'),
         "summary":        summary,
         "findings":       unique_findings,
         "tools_executed": {
