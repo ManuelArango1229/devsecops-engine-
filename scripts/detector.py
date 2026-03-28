@@ -20,7 +20,7 @@ LANGUAGE_MARKERS = {
 }
 
 SEMGREP_RULESETS = {
-    "nodejs":  "p/nodejs p/javascript p/typescript",
+    "nodejs":  "p/nodejs p/typescript",
     "python":  "p/python",
     "java":    "p/java",
     "go":      "p/golang",
