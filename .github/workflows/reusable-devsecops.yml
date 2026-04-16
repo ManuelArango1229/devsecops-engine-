@@ -867,6 +867,7 @@ jobs:
         env:
           SERVICE_NAME:  ${{ inputs.service_name }}
           ENVIRONMENT:   ${{ inputs.environment }}
+          CRITICALITY:   ${{ inputs.criticality }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           python3 scripts/normalizer.py \
@@ -909,7 +910,8 @@ jobs:
           python3 scripts/gate.py \
             --findings      reports/findings.json \
             --ai-evaluation reports/ai_evaluation.json \
-            --output        reports/gate_decision.json
+            --output        reports/gate_decision.json \
+            --criticality   "${{ inputs.criticality }}"
 
       - name: Generate Report
         run: |
@@ -939,4 +941,5 @@ jobs:
             --findings      reports/findings.json \
             --ai-evaluation reports/ai_evaluation.json \
             --output        reports/gate_decision.json \
+            --criticality   "${{ inputs.criticality }}" \
             --enforce
