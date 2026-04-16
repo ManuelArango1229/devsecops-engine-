@@ -52,6 +52,16 @@ OWASP_CATEGORIES = {
 }
 
 
+
+# ── Mapeo tool → ASC_ID (ISO/IEC 27034-1 §7.3.5) ─────────────────────────────
+TOOL_ASC_MAP = {
+    "semgrep": "ASC-SAST-001",
+    "trivy":   "ASC-SCA-001",
+    "zap":     "ASC-DAST-001",
+    "nuclei":  "ASC-PENTEST-001",
+}
+
+
 def normalize_severity(raw_severity: str) -> str:
     if raw_severity is None:
         return "INFO"
@@ -104,6 +114,7 @@ def parse_semgrep(filepath: str) -> list:
             "id":          generate_id("semgrep", title, f"{file_path}:{line}"),
             "tool":        "semgrep",
             "tool_type":   "SAST",
+            "asc_id":      TOOL_ASC_MAP["semgrep"],
             "severity":    normalize_severity(severity_raw),
             "cvss_score":  None,
             "title":       title.replace('-', ' ').replace('_', ' ').title(),
@@ -166,6 +177,7 @@ def parse_trivy(filepath: str) -> list:
                 "id":          generate_id("trivy", cve_id, pkg_name),
                 "tool":        "trivy",
                 "tool_type":   "SCA",
+                "asc_id":      TOOL_ASC_MAP["trivy"],
                 "severity":    normalize_severity(severity_raw),
                 "cvss_score":  cvss_score,
                 "title":       f"{cve_id} – {title}",
@@ -235,6 +247,7 @@ def parse_zap(filepath: str) -> list:
                 "id":          generate_id("zap", name, endpoint),
                 "tool":        "zap",
                 "tool_type":   "DAST",
+                "asc_id":      TOOL_ASC_MAP["zap"],
                 "severity":    normalize_severity(severity_raw),
                 "cvss_score":  None,
                 "title":       name,
@@ -337,6 +350,7 @@ def parse_nuclei(filepath: str) -> list:
             "id":          generate_id("nuclei", template_id, matched_url),
             "tool":        "nuclei",
             "tool_type":   "PENTEST",
+            "asc_id":      TOOL_ASC_MAP["nuclei"],
             "severity":    normalize_severity(severity_raw),
             "cvss_score":  None,
             "title":       name,

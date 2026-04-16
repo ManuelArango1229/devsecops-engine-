@@ -133,6 +133,53 @@ def build_nuclei_config(scan_mode: dict, api_spec: dict) -> dict:
     return config
 
 
+
+# ─── Application Normative Framework (ANF) — ISO/IEC 27034-1 §7.3.3 ──────────
+# Primera operacionalización de la norma en el pipeline:
+# determina qué ASCs son obligatorios ANTES de ejecutar ningún análisis.
+ASC_MAP = {
+    "semgrep": {"asc_id": "ASC-SAST-001",    "name": "Static Application Security Testing",    "ref": "ISO/IEC 27034-1 Annex A"},
+    "trivy":   {"asc_id": "ASC-SCA-001",     "name": "Software Composition Analysis",          "ref": "ISO/IEC 27034-1 Annex A"},
+    "zap":     {"asc_id": "ASC-DAST-001",    "name": "Dynamic Application Security Testing",   "ref": "ISO/IEC 27034-1 Annex A"},
+    "nuclei":  {"asc_id": "ASC-PENTEST-001", "name": "Automated Penetration Testing",          "ref": "ISO/IEC 27034-1 Annex A"},
+}
+
+_TLOT_BY_CRIT = {
+    "low":      {"score": 0.50, "required_ascs": ["semgrep", "trivy"]},
+    "medium":   {"score": 0.65, "required_ascs": ["semgrep", "trivy", "zap", "nuclei"]},
+    "high":     {"score": 0.80, "required_ascs": ["semgrep", "trivy", "zap", "nuclei"]},
+    "critical": {"score": 0.95, "required_ascs": ["semgrep", "trivy", "zap", "nuclei"]},
+}
+
+
+def build_anf(criticality, dast_enabled):
+    """ISO/IEC 27034-1 §7.3.3 — Organization Normative Framework"""
+    c = (criticality or "medium").lower()
+    tlot = _TLOT_BY_CRIT.get(c, _TLOT_BY_CRIT["medium"])
+    required = list(tlot["required_ascs"])
+    if not dast_enabled:
+        required = [a for a in required if a not in ["zap", "nuclei"]]
+    asc_defs = []
+    for tool in ["semgrep", "trivy", "zap", "nuclei"]:
+        meta = ASC_MAP[tool]
+        mandatory = tool in required
+        asc_defs.append({
+            "asc_id": meta["asc_id"], "tool": tool,
+            "name": meta["name"],     "ref": meta["ref"],
+            "mandatory": mandatory,   "enabled": mandatory or dast_enabled,
+        })
+    extra = [a.upper() for a in required if a not in ["semgrep", "trivy"]]
+    return {
+        "ref":             "ISO/IEC 27034-1:2011 §7.3.3",
+        "criticality":     c,
+        "tlot_score":      tlot["score"],
+        "required_ascs":   required,
+        "asc_definitions": asc_defs,
+        "policy":          "Criticidad %r: SAST+SCA obligatorios.%s" % (
+                               c, " Ademas: %s." % ", ".join(extra) if extra else ""),
+    }
+
+
 def detect(base_path: str, target_image: str, target_url: str,
            service: str, criticality: str, environment: str) -> dict:
 
@@ -155,6 +202,9 @@ def detect(base_path: str, target_image: str, target_url: str,
     nuclei_config  = build_nuclei_config(scan_mode, api_spec)
     dast_enabled   = scan_mode.get("mode") != "static"
 
+    # ISO/IEC 27034-1 §7.3.3
+    anf = build_anf(criticality, dast_enabled)
+
     config = {
         "schema_version": "1.0",
         "detected_at":    str(base.resolve()),
@@ -173,6 +223,7 @@ def detect(base_path: str, target_image: str, target_url: str,
             "nuclei":  nuclei_config,
             "recon":   {"enabled": dast_enabled, "tools": ["nmap", "ffuf", "httpx", "wafw00f"]},
         },
+        "iso27034_anf":  anf,
         "summary": {
             "language":         language["primary"],
             "scan_mode":        scan_mode["mode"],
