@@ -183,7 +183,7 @@ jobs:
           # Resolver reglas Semgrep según el lenguaje final
           RULES=$(python3 -c "
           rulesets = {
-              'nodejs':  'p/nodejs p/javascript p/typescript',
+              'nodejs':  'p/nodejs',
               'python':  'p/python',
               'java':    'p/java',
               'go':      'p/golang',
