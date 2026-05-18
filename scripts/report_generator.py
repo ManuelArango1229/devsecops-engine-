@@ -531,6 +531,122 @@ _No se identificaron prioridades específicas._
     return md
 
 
+
+def section_ssvc(gate_data: dict) -> str:
+    """
+    Sección SSVC + EPSS + CISA KEV — tercer gate del pipeline.
+    Reemplaza el modelo TLOT/ALOT como mecanismo de decisión cuantificable
+    sin constantes arbitrarias.
+    Ref: Al Haddad et al. (2025), Kausar et al. (2025), Yoon et al. (2023)
+    """
+    gc   = gate_data.get("gate_comparison", {})
+    ssvc = gc.get("ssvc", {})
+    if not ssvc or ssvc.get("method") != "ssvc_epss_kev":
+        return ""
+
+    dec  = ssvc.get("decision", "?")
+    agg  = ssvc.get("aggregate_action", "?")
+    ac   = ssvc.get("action_counts", {})
+    f1m  = ssvc.get("f1_metrics", {})
+    ds   = ssvc.get("data_sources", {})
+    mw   = ssvc.get("mission_wellbeing", "?")
+    crit = ssvc.get("criticality", "?")
+    dec_icon = DECISION_ICONS.get(dec, "❓")
+
+    # Distribución de acciones
+    total_classified = sum(ac.values()) if ac else 0
+    def pct_ac(k):
+        return f"{ac.get(k,0)/total_classified*100:.1f}%" if total_classified else "0%"
+
+    # Top Act findings table
+    act_rows = ""
+    for a in ssvc.get("top_act_findings", [])[:8]:
+        tool  = a.get("tool", "")
+        title = a.get("title", "")[:65]
+        expl  = a.get("exploitation", "?")
+        auto  = a.get("automatable", "?")
+        imp   = a.get("tech_impact", "?")
+        act_rows += f"| `{tool}` | {title} | {expl} | {auto} | {imp} | **Act** |\n"
+
+    # F1 metrics block
+    f1_block = ""
+    n_eval = f1m.get("cves_evaluated", 0)
+    if n_eval and n_eval > 0:
+        f1_block = f"""
+### Métricas Formales — Dimensión Exploitation (F1 Score)
+
+> Calculadas sobre CVEs con CISA KEV o EPSS disponible como *ground truth*.
+> Metodología: Al Haddad et al. (2025) — arXiv 2510.18508.
+
+| Métrica | Valor | Descripción |
+|---|---|---|
+| **Precisión** | `{f1m.get('precision', 0):.4f}` | TP / (TP + FP) |
+| **Recall** | `{f1m.get('recall', 0):.4f}` | TP / (TP + FN) |
+| **F1 Score** | `{f1m.get('f1_score', 0):.4f}` | Media armónica precisión/recall |
+| **Accuracy** | `{f1m.get('accuracy', 0):.4f}` | (TP + TN) / total |
+| CVEs evaluados | `{f1m.get('cves_evaluated', 0)}` | Solo CVEs con EPSS/KEV disponible |
+| Verdaderos positivos | `{f1m.get('true_positives', 0)}` | Clasificados active, ground truth active |
+| Falsos positivos | `{f1m.get('false_positives', 0)}` | Clasificados active, ground truth not_active |
+| Falsos negativos | `{f1m.get('false_negatives', 0)}` | Clasificados not_active, ground truth active |
+
+> **Ground truth:** CVE en CISA KEV **o** EPSS ≥ 0.5 → activo.
+> **Nota:** hallazgos sin CVE ID (Semgrep/ZAP) excluidos del cálculo formal (sin ground truth verificable).
+"""
+    else:
+        f1_block = """
+### Métricas Formales — Dimensión Exploitation
+
+> No se encontraron CVEs con EPSS disponible para calcular F1 en este caso.
+> Los hallazgos principales provienen de Semgrep/ZAP (sin CVE ID) o de CVEs sin cobertura EPSS.
+"""
+
+    return f"""---
+
+## 🔬 Gate SSVC + EPSS + CISA KEV
+
+> **Fundamento académico:** reemplaza el modelo TLOT/ALOT con constantes arbitrarias por un árbol
+> de decisión publicado por CISA/SEI-CERT que elimina la saturación y permite calcular F1 formal.
+> **Ref:** Al Haddad et al. (2025), Kausar et al. (2025), Yoon et al. (2023), Rajapakse et al. (2021).
+
+### Resultado del Gate SSVC
+
+| Indicador | Valor |
+|---|---|
+| **Decisión** | {dec_icon} **{dec}** |
+| **Acción agregada SSVC** | `{agg}` (máximo sobre todos los hallazgos) |
+| **Mission & Wellbeing** | `{mw}` (derivado de criticality=`{crit}`) |
+| **Fuente de datos KEV** | CISA Known Exploited Vulnerabilities ({ds.get('cisa_kev_entries', 0):,} entradas) |
+| **Fuente de datos EPSS** | FIRST.org API ({ds.get('epss_scores_fetched', 0)} CVEs consultados) |
+
+### Distribución de Acciones SSVC
+
+| Acción | Hallazgos | % | Gate | Significado |
+|---|---|---|---|---|
+| **Act** | `{ac.get('Act', 0)}` | {pct_ac('Act')} | ❌ FAIL | Explotación activa o automatizable con impacto total |
+| **Attend** | `{ac.get('Attend', 0)}` | {pct_ac('Attend')} | ⚠️ CONDITIONAL | Explotación probable, requiere atención pronto |
+| **Track-star** | `{ac.get('Track*', 0)}` | {pct_ac('Track*')} | ⚠️ CONDITIONAL | Monitorear activamente — riesgo controlado |
+| **Track** | `{ac.get('Track', 0)}` | {pct_ac('Track')} | ✅ PASS | Sin explotación activa conocida |
+| **Total evaluados** | `{total_classified}` | 100% | {dec_icon} **{dec}** | Decisión = acción máxima |
+
+### Hallazgos que requieren acción inmediata (Act)
+
+| Herramienta | Vulnerabilidad | Explotación | Automatizable | Impacto | Acción |
+|---|---|---|---|---|---|
+{act_rows if act_rows else "| — | No se encontraron hallazgos Act | — | — | — | ✅ Track |\n"}
+{f1_block}
+### Ventajas sobre TLOT/ALOT (modelo anterior)
+
+| Aspecto | TLOT/ALOT (reemplazado) | SSVC + EPSS + KEV (actual) |
+|---|---|---|
+| Constantes | 0.50/0.65/0.80/0.95 y −0.40/−0.25/−0.10/−0.15 definidas por autores | Árbol publicado por CISA — sin constantes propias |
+| Saturación | ALOT = 0.35 idéntico en todos los casos | Track/Attend/Act varían por hallazgo y por perfil |
+| Métricas formales | Imposible (sin ground truth) | F1, precisión, recall vs CISA KEV + EPSS |
+| Diferenciación | Los 5 casos originales: FAIL uniforme | Casos con bajo perfil de explotación → PASS/CONDITIONAL |
+
+"""
+
+
+
 def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
     """
     Comparación de los TRES gates: tradicional, IA e ISO/IEC 27034.
@@ -560,41 +676,64 @@ def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
     trad_reasons = "\n".join(f"- {r}" for r in trad.get("reasons", []))
     iso_reasoning = iso.get("reasoning", "No evaluado")
 
+    # SSVC data
+    ssvc      = gate_comparison.get("ssvc", {})
+    ssvc_dec  = ssvc.get("decision", "N/A")
+    ssvc_agg  = ssvc.get("aggregate_action", "N/A")
+    ssvc_icon = DECISION_ICONS.get(ssvc_dec, "❓")
+    ac        = ssvc.get("action_counts", {})
+    f1m       = ssvc.get("f1_metrics", {})
+    f1_str    = f"`{f1m.get('f1_score',0):.3f}`" if f1m.get("cves_evaluated",0)>0 else "N/A"
+
+    divergences = []
+    gc_analysis = gate_comparison.get("analysis", {})
+    for d in gc_analysis.get("divergences", []):
+        divergences.append(f"- {d}")
+    divergence_block = "\n".join(divergences) if divergences else "- Los tres gates concuerdan en la decisión final."
+
     return f"""---
 
 ## 🔄 Comparación: Tres Enfoques de Security Gate
 
 > **Contribución central del Trabajo de Grado:** comparar empíricamente tres mecanismos de
-> decisión de despliegue para demostrar el valor diferencial del análisis contextual (IA)
-> y la validación normativa (ISO/IEC 27034) sobre los umbrales estáticos tradicionales.
+> decisión de despliegue. El gate tradicional como línea base, el gate IA para análisis
+> contextual, y el gate SSVC+EPSS+KEV como métrica estandarizada con F1 formal.
+> ISO/IEC 27034 se conserva para trazabilidad normativa (asc_id).
 
-| Criterio | Gate Tradicional | Gate con IA | Gate ISO/IEC 27034 |
+| Criterio | Gate Tradicional | Gate con IA | Gate SSVC+EPSS+KEV |
 |---|---|---|---|
-| **Decisión** | {trad_icon} {trad_decision} | {ai_icon} {ai_decision} | {iso_icon} {iso_decision} |
-| **Método** | Umbrales numéricos fijos | Evaluación contextual LLM | Modelo TLOT/ALOT normativo |
-| **TLOT / ALOT** | N/A | N/A | {iso_tlot_str} / {iso_alot_str} |
-| **Brecha normativa** | N/A | N/A | {iso_gap:.1f}% |
-| **Fundamento** | Conteo de hallazgos | Evaluación semántica | ISO/IEC 27034-1 §7.3.6 |
-| **Considera falsos positivos** | ❌ No | ✅ Estimados ({evaluation.get('false_positive_estimate','N/A')}) | ❌ No |
-| **Evalúa explotabilidad real** | ❌ No | ✅ Sí | ❌ No |
-| **Detecta cadenas de ataque** | ❌ No | ✅ Sí | ❌ No |
-| **Documenta blind spots** | ❌ No | ✅ Sí | ❌ No |
-| **Transparencia/Trazabilidad** | ✅ Alta | ⚠️ Baja (caja negra) | ✅ Alta (fórmula explícita) |
+| **Decisión** | {trad_icon} {trad_decision} | {ai_icon} {ai_decision} | {ssvc_icon} {ssvc_dec} |
+| **Método** | Umbrales numéricos fijos | Evaluación contextual LLM | Árbol SSVC + EPSS + CISA KEV |
+| **Acción agregada** | N/A | N/A | `{ssvc_agg}` (Act/Attend/Track*/Track) |
+| **Métricas formales** | ❌ No | ❌ No | ✅ F1={f1_str} (vs CISA KEV) |
+| **Considera falsos positivos** | ❌ No | ✅ Estimados ({evaluation.get('false_positive_estimate','N/A')}) | ✅ EPSS filtra low-risk |
+| **Evalúa explotabilidad real** | ❌ No | ✅ Semántica LLM | ✅ CISA KEV + EPSS empírico |
+| **Detecta cadenas de ataque** | ❌ No | ✅ Sí | ❌ No (por hallazgo individual) |
+| **Constantes arbitrarias** | ✅ Umbrales fijos | N/A | ❌ Ninguna (árbol CISA público) |
+| **Saturación de scores** | ✅ Posible | N/A | ❌ Elimina saturación |
+| **Transparencia** | ✅ Alta | ⚠️ Caja negra | ✅ Alta (árbol publicado CISA) |
 | **Determinístico** | ✅ Sí | ❌ No | ✅ Sí |
-| **Costo computacional** | Nulo | ~$0.005/run | Nulo |
-| **Modelo / versión** | Reglas fijas | `{ai.get('ai_model','N/A')}` | ISO/IEC 27034-1:2011 |
-| **Confianza / score** | N/A (determinístico) | {ai.get('confidence',0):.0%} | ALOT={iso_alot_str} |
+| **Costo computacional** | Nulo | ~$0.005/run | ~API calls gratuitas |
+| **Modelo / versión** | Reglas fijas | `{ai.get('ai_model','N/A')}` | SSVC v2.1 + FIRST.org EPSS |
+| **Confianza / score** | N/A | {ai.get('confidence',0):.0%} | {f1_str} F1 (Exploitation) |
 
-**Análisis de la comparación:** {analysis.get('comparison','N/A')}
+### Divergencias entre gates
 
-**Insight académico:** {analysis.get('academic_insight','N/A')}
+{divergence_block}
 
-**Razonamiento ISO/IEC 27034:** {iso_reasoning}
+**Insight académico:** {gc_analysis.get('academic_insight','N/A')}
+
+**Análisis de la comparación:** {gc_analysis.get('comparison', analysis.get('comparison','N/A'))}
 
 **Razones del gate tradicional:**
 {trad_reasons}
 
 **Análisis de falsos positivos (IA):** {evaluation.get('false_positive_reasoning','N/A')}
+
+> **Nota sobre ISO/IEC 27034:** el modelo TLOT/ALOT fue reemplazado por SSVC+EPSS+KEV
+> para eliminar constantes arbitrarias y habilitar métricas formales. ISO/IEC 27034 se
+> conserva como marco de trazabilidad normativa: cada hallazgo mantiene su `asc_id` y
+> los ASCs ejecutados quedan registrados (ver sección siguiente).
 
 """
 
@@ -610,7 +749,7 @@ def section_iso27034(gate_data):
     if not ISO27034_AVAILABLE:
         return """---
 
-## 📋 Evaluación de Conformidad ISO/IEC 27034
+## 📋 Trazabilidad Normativa ISO/IEC 27034 (ASC Coverage)
 
 > ⚠️ El módulo `iso27034.py` no está disponible. Instálalo en `scripts/` para activar la validación normativa.
 
@@ -805,6 +944,7 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     report += section_ai_analysis(evaluation, ai_eval_data)
     report += section_attack_chains(attack_chains)
     report += section_remediation(evaluation.get("remediation_priorities", []))
+    report += section_ssvc(gate_data)
     report += section_gate_comparison(gate_comparison, ai_eval_data, gate_data)
     report += section_iso27034(gate_data)
     report += section_findings_detail(findings, tools_executed)
@@ -822,7 +962,11 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     print(f"  📄 Tamaño         : {len(report):,} caracteres")
     print(f"  🔗 Cadenas ataque : {len(attack_chains)}")
     print(f"  🚦 Decisión       : {gate_data.get('decision','UNKNOWN')}")
-    print(f"  📋 ISO/IEC 27034  : {'✅ incluido' if ISO27034_AVAILABLE else '⚠️ módulo no disponible'}")
+    ssvc_r = gate_data.get("gate_comparison",{}).get("ssvc",{})
+    ssvc_f1 = ssvc_r.get("f1_metrics",{}).get("f1_score","N/A")
+    print(f"  🔬 SSVC decision  : {ssvc_r.get('decision','N/A')} ({ssvc_r.get('aggregate_action','?')})")
+    print(f"  📊 SSVC F1        : {ssvc_f1}")
+    print(f"  📋 ISO/IEC 27034  : trazabilidad normativa (ASC coverage)")
     print(f"  📊 Hallazgos      : {total_findings} únicos de {sum(tools_executed.values())} raw")
     print("="*60 + "\n")
 
