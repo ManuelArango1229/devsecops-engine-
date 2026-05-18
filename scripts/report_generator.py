@@ -600,6 +600,9 @@ def section_ssvc(gate_data: dict) -> str:
 > Los hallazgos principales provienen de Semgrep/ZAP (sin CVE ID) o de CVEs sin cobertura EPSS.
 """
 
+    if not act_rows:
+        act_rows = "| — | Sin hallazgos Act — bajo perfil de explotación | — | — | — | PASS |\n"
+
     return f"""---
 
 ## 🔬 Gate SSVC + EPSS + CISA KEV
@@ -632,7 +635,7 @@ def section_ssvc(gate_data: dict) -> str:
 
 | Herramienta | Vulnerabilidad | Explotación | Automatizable | Impacto | Acción |
 |---|---|---|---|---|---|
-{act_rows if act_rows else "| — | No se encontraron hallazgos Act | — | — | — | ✅ Track |\n"}
+{act_rows}
 {f1_block}
 ### Ventajas sobre TLOT/ALOT (modelo anterior)
 
