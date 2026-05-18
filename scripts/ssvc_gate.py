@@ -252,7 +252,7 @@ def _classify_mission_wellbeing(criticality: str) -> str:
 
 def _extract_cwes(finding: dict) -> list:
     """Extrae lista de CWE IDs normalizados del finding."""
-    raw = finding.get("cwe", [])
+    raw = finding.get("cwe") or []
     if isinstance(raw, str):
         raw = [raw]
     result = []
