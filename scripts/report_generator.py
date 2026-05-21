@@ -650,6 +650,78 @@ def section_ssvc(gate_data: dict) -> str:
 
 
 
+
+def section_ssvc_enrichment(ai_eval_data: dict) -> str:
+    """
+    Sección que documenta el enriquecimiento SSVC/EPSS/KEV usado por el gate IA.
+    Aparece dentro del bloque de evaluación IA para mostrar el contexto empírico.
+    Ref: Al Haddad et al. (2025) – arXiv 2510.18508
+    """
+    enrichment = ai_eval_data.get("ssvc_enrichment", {})
+    if not enrichment.get("used"):
+        return ""
+
+    ev         = ai_eval_data.get("evaluation", {})
+    ssvc_val   = ev.get("ssvc_validation", [])
+    f1m        = enrichment.get("f1_metrics", {})
+    ac         = enrichment.get("action_counts", {})
+
+    n_conf  = sum(1 for v in ssvc_val if v.get("ai_assessment") == "confirmed")
+    n_over  = sum(1 for v in ssvc_val if v.get("ai_assessment") == "overestimated")
+    n_under = sum(1 for v in ssvc_val if v.get("ai_assessment") == "underestimated")
+
+    # Tabla de validaciones si existen
+    val_rows = ""
+    for v in ssvc_val[:8]:
+        assessment = v.get("ai_assessment", "")
+        icon = {"confirmed": "✅", "overestimated": "⚠️", "underestimated": "🔴"}.get(assessment, "❓")
+        epss = v.get("epss_score", 0)
+        kev  = "Sí" if v.get("in_kev") else "No"
+        val_rows += (
+            f"| `{v.get('ssvc_preliminary','?')}` "
+            f"| {icon} {assessment} "
+            f"| EPSS: {epss:.3f} / KEV: {kev} "
+            f"| {v.get('reasoning','')[:70]}... |\n"
+        )
+
+    f1_line = ""
+    if f1m.get("cves_evaluated", 0) > 0:
+        f1_line = (
+            f"\n> **F1 Exploitation (ground truth KEV+EPSS):** "
+            f"`{f1m.get('f1_score',0):.3f}` "
+            f"(P={f1m.get('precision',0):.3f}, R={f1m.get('recall',0):.3f}, "
+            f"n={f1m.get('cves_evaluated',0)} CVEs)"
+        )
+
+    return f"""
+### 🔬 Contexto SSVC/EPSS/KEV Usado en Esta Evaluación
+
+> **Gate híbrido IA + SSVC/EPSS/KEV** — el LLM recibió como contexto las
+> clasificaciones SSVC preliminares y datos empíricos de explotabilidad, siguiendo
+> la metodología de **Al Haddad et al. (2025)** *(arXiv 2510.18508)* que demuestra
+> que los LLMs mejoran la clasificación SSVC cuando se enriquece su contexto con
+> datos EPSS/KEV. El LLM puede validar o corregir las clasificaciones basándose
+> en el contexto específico de la aplicación.
+
+| Métrica de Enriquecimiento | Valor |
+|---|---|
+| **CISA KEV consultado** | {enrichment.get('kev_entries', 0):,} entradas |
+| **EPSS scores obtenidos** | {enrichment.get('epss_fetched', 0)} CVEs |
+| **Hallazgos clasificados SSVC** | {enrichment.get('classified_count', 0)} |
+| **Distribución SSVC** | Act={ac.get('Act',0)}, Attend={ac.get('Attend',0)}, Track*={ac.get('Track*',0)}, Track={ac.get('Track',0)} |{f1_line}
+
+{f"""### Validación Cruzada LLM ↔ SSVC ({len(ssvc_val)} hallazgos validados)
+
+El LLM analizó las clasificaciones SSVC preliminares y produjo su propio juicio:
+**{n_conf} confirmados**, **{n_over} sobreestimados**, **{n_under} subestimados**.
+
+| SSVC Preliminar | Juicio IA | Evidencia Empírica | Razonamiento |
+|---|---|---|---|
+{val_rows}
+""" if ssvc_val else ""}
+"""
+
+
 def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
     """
     Comparación de los TRES gates: tradicional, IA e ISO/IEC 27034.
@@ -948,6 +1020,7 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     report += section_attack_chains(attack_chains)
     report += section_remediation(evaluation.get("remediation_priorities", []))
     report += section_ssvc(gate_data)
+    report += section_ssvc_enrichment(ai_eval_data)
     report += section_gate_comparison(gate_comparison, ai_eval_data, gate_data)
     report += section_iso27034(gate_data)
     report += section_findings_detail(findings, tools_executed)
@@ -969,6 +1042,8 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     ssvc_f1 = ssvc_r.get("f1_metrics",{}).get("f1_score","N/A")
     print(f"  🔬 SSVC decision  : {ssvc_r.get('decision','N/A')} ({ssvc_r.get('aggregate_action','?')})")
     print(f"  📊 SSVC F1        : {ssvc_f1}")
+    enrichment_used = ai_eval_data.get("ssvc_enrichment", {}).get("used", False)
+    print(f"  🔬 IA híbrida SSVC: {'Sí - enriquecida con EPSS/KEV' if enrichment_used else 'No (ssvc_gate no disponible)'}")
     print(f"  📋 ISO/IEC 27034  : trazabilidad normativa (ASC coverage)")
     print(f"  📊 Hallazgos      : {total_findings} únicos de {sum(tools_executed.values())} raw")
     print("="*60 + "\n")

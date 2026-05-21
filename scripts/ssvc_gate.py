@@ -252,7 +252,7 @@ def _classify_mission_wellbeing(criticality: str) -> str:
 
 def _extract_cwes(finding: dict) -> list:
     """Extrae lista de CWE IDs normalizados del finding."""
-    raw = finding.get("cwe") or []
+    raw = finding.get("cwe", [])
     if isinstance(raw, str):
         raw = [raw]
     result = []
@@ -319,17 +319,28 @@ def ssvc_gate(findings_data: dict, criticality: str) -> dict:
 
         action_counts[action] = action_counts.get(action, 0) + 1
 
+        # Extraer CVE ID para enriquecimiento del prompt IA
+        import re as _re
+        _cve_id = f.get("cve_id") or ""
+        if not _cve_id.startswith("CVE-"):
+            _m = _re.search(r"CVE-\d{4}-\d+", f.get("title",""))
+            _cve_id = _m.group() if _m else ""
+
         record = {
-            "finding_id":    f.get("id", ""),
-            "title":         f.get("title", "")[:80],
-            "tool":          f.get("tool", ""),
-            "severity":      f.get("severity", ""),
-            "exploitation":  exploitation,
-            "automatable":   automatable,
-            "tech_impact":   tech_impact,
+            "finding_id":       f.get("id", ""),
+            "title":            f.get("title", "")[:80],
+            "tool":             f.get("tool", ""),
+            "severity":         f.get("severity", ""),
+            "exploitation":     exploitation,
+            "automatable":      automatable,
+            "tech_impact":      tech_impact,
             "mission_wellbeing": mw,
-            "ssvc_action":   action,
-            "gate_mapping":  SSVC_TO_GATE.get(action, "FAIL"),
+            "ssvc_action":      action,
+            "gate_mapping":     SSVC_TO_GATE.get(action, "FAIL"),
+            # Enriquecimiento para gate IA híbrido
+            "cve_id":           _cve_id,
+            "epss_score":       round(epss_cache.get(_cve_id, 0.0), 4) if _cve_id else 0.0,
+            "in_kev":           _cve_id in kev_set if _cve_id else False,
         }
         classified.append(record)
         if action == "Act":
@@ -368,6 +379,7 @@ def ssvc_gate(findings_data: dict, criticality: str) -> dict:
             "epss_scores_fetched": len(epss_cache),
             "cve_ids_queried":    len(cve_ids),
         },
+        "all_classified_findings": classified,
         "top_act_findings": act_findings[:10],
         "reasoning":        reasoning,
         "f1_metrics":       f1_metrics,
