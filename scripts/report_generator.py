@@ -693,6 +693,19 @@ def section_ssvc_enrichment(ai_eval_data: dict) -> str:
             f"n={f1m.get('cves_evaluated',0)} CVEs)"
         )
 
+    # Pre-compute validation block to avoid nested f-strings (Python < 3.12)
+    if ssvc_val:
+        val_block = (
+            f"### Validación Cruzada LLM ↔ SSVC ({len(ssvc_val)} hallazgos validados)\n\n"
+            f"El LLM analizó las clasificaciones SSVC preliminares y produjo su propio juicio:\n"
+            f"**{n_conf} confirmados**, **{n_over} sobreestimados**, **{n_under} subestimados**.\n\n"
+            "| SSVC Preliminar | Juicio IA | Evidencia Empírica | Razonamiento |\n"
+            "|---|---|---|---|\n"
+            f"{val_rows}"
+        )
+    else:
+        val_block = ""
+
     return f"""
 ### 🔬 Contexto SSVC/EPSS/KEV Usado en Esta Evaluación
 
@@ -710,15 +723,7 @@ def section_ssvc_enrichment(ai_eval_data: dict) -> str:
 | **Hallazgos clasificados SSVC** | {enrichment.get('classified_count', 0)} |
 | **Distribución SSVC** | Act={ac.get('Act',0)}, Attend={ac.get('Attend',0)}, Track*={ac.get('Track*',0)}, Track={ac.get('Track',0)} |{f1_line}
 
-{f"""### Validación Cruzada LLM ↔ SSVC ({len(ssvc_val)} hallazgos validados)
-
-El LLM analizó las clasificaciones SSVC preliminares y produjo su propio juicio:
-**{n_conf} confirmados**, **{n_over} sobreestimados**, **{n_under} subestimados**.
-
-| SSVC Preliminar | Juicio IA | Evidencia Empírica | Razonamiento |
-|---|---|---|---|
-{val_rows}
-""" if ssvc_val else ""}
+{val_block}
 """
 
 
