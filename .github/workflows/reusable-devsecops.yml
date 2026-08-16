@@ -149,21 +149,22 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-            mkdir -p results
-            python3 -c "
-            import json
-            json.dump({
-                'service': '${{ inputs.service_name }}',
-                'language': '${{ inputs.language }}',
-                'business_criticality': '${{ inputs.criticality }}',
-                'environment': '${{ inputs.environment }}',
-                'scan_mode': 'image',
-                'iso27034_anf': {
-                    'required_ascs': ['ASC-SAST-001','ASC-SCA-001','ASC-DAST-001','ASC-PENTEST-001'],
-                    'optional_ascs': []
-                }
-            }, open('results/scan_config.json','w'), indent=2)
-            "
+          if [ ! -s results/scan_config.json ]; then
+            cat > results/scan_config.json << 'EOJSON'
+          {
+            "service": "${{ inputs.service_name }}",
+            "language": "${{ inputs.language }}",
+            "business_criticality": "${{ inputs.criticality }}",
+            "environment": "${{ inputs.environment }}",
+            "scan_mode": "image",
+            "iso27034_anf": {
+              "required_ascs": ["ASC-SAST-001","ASC-SCA-001","ASC-DAST-001","ASC-PENTEST-001"],
+              "optional_ascs": []
+            }
+          }
+          EOJSON
+          fi
+
 
       - name: Upload scan_config
         uses: actions/upload-artifact@v4
