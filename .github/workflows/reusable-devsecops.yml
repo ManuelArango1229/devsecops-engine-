@@ -616,8 +616,9 @@ jobs:
         run: |
           python scripts/ai_engine.py \
             --findings    results/findings.json \
-            --ssvc-result results/ssvc_result.json \
-            --scan-config results/scan_config.json \
+            --service     "${{ inputs.service_name }}" \
+            --criticality "${{ inputs.criticality }}" \
+            --environment "${{ inputs.environment }}" \
             --output      results/ai_evaluation.json
 
       # ── Paso 4: Security Gate (consolidación 3 enfoques) ──────────────────
@@ -626,7 +627,6 @@ jobs:
           python scripts/gate.py \
             --findings      results/findings.json \
             --ai-evaluation results/ai_evaluation.json \
-            --ssvc-result   results/ssvc_result.json \
             --criticality   "${{ inputs.criticality }}" \
             --output        results/gate_decision.json
 
