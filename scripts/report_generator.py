@@ -189,12 +189,14 @@ def build_iso27034_traceability(scan_config, findings_list, tools_executed=None)
             ),
         })
 
+    _lang     = scan_config.get("language", "unknown")
+    _mode     = scan_config.get("scan_mode", "unknown")
     return {
         "ascs_executed":  list(executed_set),
         "asc_breakdown":  breakdown,
-        "language":       scan_config.get("language", "unknown"),
-        "criticality":    scan_config.get("business_criticality", "medium"),
-        "scan_mode":      scan_config.get("scan_mode", "unknown"),
+        "language":       _lang.get("primary", "unknown") if isinstance(_lang, dict) else str(_lang),
+        "criticality":    scan_config.get("business_criticality") or scan_config.get("criticality") or "medium",
+        "scan_mode":      _mode.get("mode", "unknown") if isinstance(_mode, dict) else str(_mode),
         "anf_defined":    bool(anf),
     }
 
@@ -753,68 +755,124 @@ def section_ssvc(gate_data):
 
 
 def section_ssvc_enrichment(ai_eval_data):
+    """
+    Sección que evidencia el motor IA híbrido v1.3:
+    - Qué datos recibió el LLM (SSVC, EPSS, CISA KEV, asc_id)
+    - Cómo los procesó (validación por hallazgo)
+    - Referencia académica que justifica el diseño
+    """
     enrichment = ai_eval_data.get("ssvc_enrichment", {})
     if not enrichment.get("used"):
-        return ""
+        return """
+### ⚠️ Motor IA sin enriquecimiento SSVC
 
-    ev       = ai_eval_data.get("evaluation", {})
-    ssvc_val = ev.get("ssvc_validation", [])
-    f1m      = enrichment.get("f1_metrics", {})
-    ac       = enrichment.get("action_counts", {})
+El evaluador de respaldo estático fue activado (confianza 0.60).
+El LLM no recibió contexto SSVC/EPSS/KEV en esta corrida.
+Causa probable: volumen de hallazgos superó el límite de tokens del proveedor.
+
+"""
+
+    ev          = ai_eval_data.get("evaluation", {})
+    ssvc_val    = ev.get("ssvc_validation", [])
+    f1m         = enrichment.get("f1_metrics", {})
+    ac          = enrichment.get("action_counts", {})
+    model       = ai_eval_data.get("ai_model", "N/A")
+    tokens      = ai_eval_data.get("tokens_used", {})
+    pv          = ai_eval_data.get("prompt_version", "N/A")
+    acad_ref    = ai_eval_data.get("_academic_reference", "Al Haddad et al. (2025) – arXiv 2510.18508")
+    acad_note   = ai_eval_data.get("_academic_note", "")
+    ctx_used    = ev.get("ssvc_context_used", enrichment.get("used", False))
 
     n_conf  = sum(1 for v in ssvc_val if v.get("ai_assessment") == "confirmed")
     n_over  = sum(1 for v in ssvc_val if v.get("ai_assessment") == "overestimated")
     n_under = sum(1 for v in ssvc_val if v.get("ai_assessment") == "underestimated")
 
+    # Tabla de validación por hallazgo
     val_rows = ""
-    for v in ssvc_val[:8]:
+    for v in ssvc_val:
         assessment = v.get("ai_assessment", "")
         icon = {"confirmed": "✅", "overestimated": "⚠️", "underestimated": "🔴"}.get(assessment, "❓")
         epss = v.get("epss_score", 0)
-        kev  = "Sí" if v.get("in_kev") else "No"
+        kev  = "✅ Sí" if v.get("in_kev") else "No"
+        asc  = v.get("asc_id", "—")
+        reasoning = v.get("reasoning", "")
+        reasoning = reasoning[:90] + "..." if len(reasoning) > 90 else reasoning
         val_rows += (
+            f"| `{v.get('finding_id','?')}` "
+            f"| {v.get('title','')[:40]} "
             f"| `{v.get('ssvc_preliminary','?')}` "
-            f"| {icon} {assessment} "
-            f"| EPSS: {epss:.3f} / KEV: {kev} "
-            f"| {v.get('reasoning','')[:70]}... |\n"
+            f"| {icon} **{assessment}** "
+            f"| `{epss:.4f}` "
+            f"| {kev} "
+            f"| {reasoning} |\n"
         )
+
+    if not val_rows:
+        val_rows = "| — | Sin hallazgos validados | — | — | — | — | — |\n"
 
     f1_line = ""
     if f1m.get("cves_evaluated", 0) > 0:
         f1_line = (
-            f"\n> **F1 Exploitation (ground truth KEV+EPSS):** "
-            f"`{f1m.get('f1_score',0):.3f}` "
-            f"(P={f1m.get('precision',0):.3f}, R={f1m.get('recall',0):.3f}, "
-            f"n={f1m.get('cves_evaluated',0)} CVEs)"
+            f"\n| **F1 Exploitation** | `{f1m.get('f1_score',0):.4f}` "
+            f"(P={f1m.get('precision',0):.4f}, R={f1m.get('recall',0):.4f}, "
+            f"n={f1m.get('cves_evaluated',0)} CVEs) |"
         )
-
-    if ssvc_val:
-        val_block = (
-            f"### Validación Cruzada LLM ↔ SSVC ({len(ssvc_val)} hallazgos)\n\n"
-            f"**{n_conf} confirmados**, **{n_over} sobreestimados**, **{n_under} subestimados**.\n\n"
-            "| SSVC Preliminar | Juicio IA | Evidencia Empírica | Razonamiento |\n"
-            "|---|---|---|---|\n"
-            f"{val_rows}"
-        )
-    else:
-        val_block = ""
 
     return f"""
-### 🔬 Contexto SSVC/EPSS/KEV Usado en el Gate IA (Motor Híbrido v1.3)
+---
 
-> Antes de invocar al LLM, el motor ejecuta `ssvc_gate.py` y enriquece el prompt
-> con clasificaciones SSVC, scores EPSS y estado KEV por hallazgo. El LLM puede
-> confirmar o corregir las clasificaciones con razonamiento contextual.
-> **Ref:** Al Haddad et al. (2025) — arXiv 2510.18508.
+## 🤖 Evidencia del Motor IA Híbrido v1.3
 
-| Métrica | Valor |
+> **Base académica:** {acad_ref}
+>
+> {acad_note}
+
+### Datos enviados al LLM en esta corrida
+
+Antes de invocar al modelo de lenguaje, `ai_engine.py` ejecutó `ssvc_gate.py` y
+construyó un prompt enriquecido con las clasificaciones SSVC preliminares, scores EPSS
+y estado CISA KEV por hallazgo. El LLM recibió evidencia empírica verificable junto
+con la descripción técnica de cada hallazgo y su `asc_id` de trazabilidad ISO/IEC 27034.
+
+| Campo del prompt | Valor enviado al LLM |
 |---|---|
-| **CISA KEV consultado** | {enrichment.get('kev_entries', 0):,} entradas |
-| **EPSS scores obtenidos** | {enrichment.get('epss_fetched', 0)} CVEs |
+| **Modelo LLM** | `{model}` |
+| **Versión del prompt** | `{pv}` (indica prompt enriquecido con SSVC/EPSS/KEV) |
+| **Tokens de prompt** | `{tokens.get('prompt', 0):,}` |
+| **Tokens de completion** | `{tokens.get('completion', 0):,}` |
+| **Contexto SSVC activo** | {'✅ Sí — el LLM recibió clasificaciones SSVC por hallazgo' if ctx_used else '❌ No'} |
+| **CISA KEV consultado** | {enrichment.get('kev_entries', 0):,} entradas (fuente: cisa.gov) |
+| **EPSS consultado** | {enrichment.get('epss_fetched', 0)} CVEs (fuente: FIRST.org API) |
 | **Hallazgos clasificados SSVC** | {enrichment.get('classified_count', 0)} |
-| **Distribución** | Act={ac.get('Act',0)}, Attend={ac.get('Attend',0)}, Track*={ac.get('Track*',0)}, Track={ac.get('Track',0)} |{f1_line}
+| **Distribución SSVC pre-LLM** | Act={ac.get('Act',0)}, Attend={ac.get('Attend',0)}, Track*={ac.get('Track*',0)}, Track={ac.get('Track',0)} |{f1_line}
 
-{val_block}
+### Datos de trazabilidad ISO/IEC 27034 incluidos en el prompt
+
+Cada hallazgo enviado al LLM incluye su `asc_id`, que vincula la vulnerabilidad
+al control de seguridad de aplicación que la detectó. Esto permite al LLM razonar
+sobre la cobertura normativa dentro de su evaluación contextual.
+
+| Tool type | ASC enviado al LLM | Significado normativo |
+|---|---|---|
+| SAST (Semgrep) | `ASC-SAST-001` | Control de análisis estático — ISO/IEC 27034-1 Annex A |
+| SCA (Trivy) | `ASC-SCA-001` | Control de composición de software — ISO/IEC 27034-1 Annex A |
+| DAST (ZAP) | `ASC-DAST-001` | Control de análisis dinámico — ISO/IEC 27034-1 Annex A |
+| Pentest (Nuclei) | `ASC-PENTEST-001` | Control de pruebas activas — ISO/IEC 27034-1 Annex A |
+
+### Respuesta del LLM — Validación cruzada SSVC ({len(ssvc_val)} hallazgos)
+
+El LLM analizó las clasificaciones SSVC preliminares y emitió su propio juicio:
+**{n_conf} confirmado(s)**, **{n_over} sobreestimado(s)**, **{n_under} subestimado(s)**.
+
+| ID | Hallazgo | SSVC prelim. | Juicio IA | EPSS | En KEV | Razonamiento del LLM |
+|---|---|---|---|---|---|---|
+{val_rows}
+
+> **Interpretación:** `confirmed` significa que el LLM valida la clasificación SSVC
+> con el contexto de la aplicación. `overestimated` indica que el LLM considera que
+> el riesgo real es menor al que sugieren las heurísticas CWE. `underestimated`
+> indica lo contrario.
+
 """
 
 
@@ -883,11 +941,6 @@ def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
 
 
 def section_iso27034(gate_data):
-    """
-    Sección de trazabilidad normativa ISO/IEC 27034.
-    Muestra qué controles ASC se ejecutaron, cuántos hallazgos produjeron
-    y si hay brechas de cobertura respecto al ANF del servicio.
-    """
     tra = gate_data.get("iso27034_traceability", {})
     if not tra:
         return """---
@@ -899,117 +952,128 @@ def section_iso27034(gate_data):
 
 """
 
-    executed  = tra.get("ascs_executed", [])
-    breakdown = tra.get("asc_breakdown", [])
-    language  = tra.get("language", "unknown")
+    executed    = tra.get("ascs_executed", [])
+    breakdown   = tra.get("asc_breakdown", [])
+    language    = tra.get("language", "unknown")
     criticality = tra.get("criticality", "medium")
-    scan_mode = tra.get("scan_mode", "unknown")
-    anf_def   = tra.get("anf_defined", False)
+    scan_mode   = tra.get("scan_mode", "unknown")
+    anf_def     = tra.get("anf_defined", False)
 
-    required  = [b for b in breakdown if b.get("required")]
-    exec_req  = [b for b in required if b.get("status") == "executed"]
-    gap       = [b for b in required if b.get("status") != "executed"]
+    required = [b for b in breakdown if b.get("required")]
+    exec_req = [b for b in required if b.get("status") == "executed"]
+    optional = [b for b in breakdown if not b.get("required")]
+    gap      = [b for b in required if b.get("status") != "executed"]
 
-    # Tabla principal
+    # Estado general de cumplimiento
+    if len(required) > 0 and len(exec_req) == len(required):
+        compliance_status = "✅ **CUMPLIDO** — todos los controles obligatorios se ejecutaron"
+        compliance_icon   = "✅"
+    elif len(exec_req) > 0:
+        compliance_status = f"⚠️ **PARCIAL** — {len(exec_req)} de {len(required)} controles obligatorios ejecutados"
+        compliance_icon   = "⚠️"
+    else:
+        compliance_status = "❌ **NO CUMPLIDO** — ningún control obligatorio se ejecutó"
+        compliance_icon   = "❌"
+
+    # Narrativa por control
+    control_narrative = ""
+    for b in breakdown:
+        asc      = b.get("asc_id", "?")
+        tool     = b.get("tool", "—")
+        desc     = b.get("description", "—")
+        count    = b.get("findings_count", 0)
+        is_req   = b.get("required", False)
+        executed = b.get("status") == "executed"
+        sev_dist = b.get("severity_dist", {})
+
+        req_label = "obligatorio" if is_req else "opcional"
+        if executed and count == 0:
+            result_txt = (
+                "se ejecutó correctamente y **no detectó vulnerabilidades** en este contexto. "
+                "Este es el resultado esperado en una aplicación bien configurada."
+            )
+            result_icon = "✅"
+        elif executed and count > 0:
+            sevs = ", ".join(
+                f"{n} {s}" for s, n in sev_dist.items()
+            )
+            result_txt = (
+                f"se ejecutó y **detectó {count} hallazgo(s)** ({sevs}). "
+                "Los hallazgos están documentados en la sección de detalle."
+            )
+            result_icon = "🟡" if any(s in sev_dist for s in ["CRITICAL","HIGH"]) else "ℹ️"
+        else:
+            result_txt = (
+                "**no se ejecutó** en esta corrida. Posible causa: herramienta no disponible, "
+                "aplicación sin respuesta HTTP, o fallo en el job correspondiente."
+            )
+            result_icon = "⚠️"
+
+        control_narrative += (
+            f"**{result_icon} {asc}** ({tool}) — Control {req_label}  \n"
+            f"{desc}: {result_txt}\n\n"
+        )
+
+    # Tabla resumen
     rows = ""
     for b in breakdown:
-        asc     = b.get("asc_id", "?")
-        tool    = b.get("tool", "—")
-        desc    = b.get("description", "—")
-        req_lbl = "✅ Obligatorio" if b.get("required") else "⚪ Opcional"
-        status  = b.get("status", "?")
-        note    = b.get("compliance_note", "")
-        count   = b.get("findings_note", f"{b.get('findings_count',0)} hallazgos")
+        asc      = b.get("asc_id", "?")
+        tool     = b.get("tool", "—")
+        req_lbl  = "✅ Obligatorio" if b.get("required") else "⚪ Opcional"
+        st       = "✅ Ejecutado" if b.get("status") == "executed" else "⚠️ No ejecutado"
+        count    = b.get("findings_count", 0)
+        sev_dist = b.get("severity_dist", {})
+        sev_str  = " / ".join(
+            f"{SEVERITY_ICONS.get(s,'')}{s[0]}:{n}"
+            for s, n in sev_dist.items()
+        ) if sev_dist else ("Sin hallazgos" if b.get("status") == "executed" else "—")
+        rows += f"| `{asc}` | {tool} | {req_lbl} | {st} | {count} | {sev_str} |\n"
 
-        sev_dist  = b.get("severity_dist", {})
-        sev_parts = []
-        for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
-            n = sev_dist.get(sev, 0)
-            if n:
-                icon = {"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","LOW":"🟢","INFO":"⚪"}.get(sev,"")
-                sev_parts.append(f"{icon}{sev[0]}:{n}")
-        sev_str = " ".join(sev_parts) if sev_parts else "—"
-
-        rows += f"| `{asc}` | {tool} | {desc} | {req_lbl} | {note} | {count} | {sev_str} |\n"
-
-    if not rows:
-        rows = "| — | — | — | — | Sin datos | — | — |\n"
-
+    gap_block = ""
     if gap:
         gap_block = (
-            "### ⚠️ Controles no ejecutados en esta corrida\n\n"
-            "Los siguientes controles son obligatorios según el ANF pero no "
-            "se ejecutaron o no produjeron resultados:\n\n"
-            + "\n".join(
-                f"- `{b.get('asc_id')}` — **{b.get('tool','?')}**: {b.get('description','')}  \n"
-                f"  Posible causa: herramienta no disponible, aplicación sin respuesta HTTP, "
-                f"o fallo en el job correspondiente."
-                for b in gap
-            )
-            + "\n\n"
-        )
-    else:
-        gap_block = (
-            "### ✅ Cobertura completa del ANF\n\n"
-            f"Los {len(exec_req)} controles obligatorios definidos en el ANF para este servicio "
-            f"(`criticality={criticality}`, `language={language}`) se ejecutaron correctamente "
-            f"en esta corrida. Los controles sin hallazgos confirman la ausencia de vulnerabilidades "
-            f"de ese tipo en el contexto analizado — esto es un resultado positivo, no una omisión.\n\n"
+            "\n> ⚠️ **Brechas de cobertura:** los siguientes controles obligatorios "
+            "no se ejecutaron en esta corrida: "
+            + ", ".join(f"`{b.get('asc_id')}`" for b in gap)
+            + ". Revisar la configuración del pipeline antes de promover a producción.\n"
         )
 
     return f"""---
 
 ## 📋 Trazabilidad Normativa ISO/IEC 27034
 
-> ### ¿Cómo opera ISO/IEC 27034 en este pipeline?
->
-> ISO/IEC 27034-1:2011 establece que la seguridad debe trazarse a través de
-> **Application Security Controls (ASC)** vinculados al ciclo de vida de la aplicación.
-> El pipeline lo materializa en tres puntos operativos:
->
-> | Punto | Componente | Acción |
-> |---|---|---|
-> | **1 — ANF** | `detector.py` → `scan_config.json` | Define qué ASC son obligatorios según lenguaje y criticidad |
-> | **2 — asc_id** | `normalizer.py` → `findings.json` | Etiqueta cada hallazgo con el ASC que lo detectó |
-> | **3 — Auditoría** | Este reporte | Compara ASC ejecutados vs. requeridos; detecta brechas |
+**Estado de cumplimiento: {compliance_status}**
 
-### Contexto de esta corrida
+ISO/IEC 27034-1:2011 exige que cada aplicación defina un **ANF** (*Application Normative
+Framework*) con los controles de seguridad obligatorios según su nivel de criticidad.
+Para este servicio con `criticality={criticality}` el ANF requiere {len(required)} control(es)
+obligatorio(s). Los {len(optional)} control(es) restante(s) son opcionales y se ejecutaron
+como cobertura adicional.
 
-| Campo | Valor |
-|---|---|
-| **Lenguaje detectado** | `{language}` |
-| **Criticidad declarada** | `{criticality}` |
-| **Modo de escaneo** | `{scan_mode}` |
-| **ANF generado por detector** | {'✅ Sí' if anf_def else '⚠️ No — se usaron ASC canónicos por defecto'} |
-| **Controles obligatorios requeridos** | {len(required)} |
-| **Controles obligatorios ejecutados** | **{len(exec_req)} / {len(required)}** |
+### Resultado por control de seguridad
 
-### Matriz de controles ASC ejecutados
+{control_narrative}
+### Resumen de cobertura ANF
 
-| ASC | Herramienta | Control de seguridad | Obligatorio | Cumplimiento | Hallazgos únicos | Severidades |
-|---|---|---|---|---|---|---|
+| ASC | Herramienta | Obligatoriedad | Estado | Hallazgos | Severidades |
+|---|---|---|---|---|---|
 {rows}
-
 {gap_block}
 
-### Interpretación de resultados sin hallazgos
+> **ANF generado por:** `detector.py` según `criticality={criticality}` y `language={language}` — {"✅ generado automáticamente" if anf_def else "⚠️ valores por defecto"}  
+> **Política aplicada:** a mayor criticidad declarada, más controles son obligatorios.
+> Para `low`: SAST + SCA obligatorios. Para `high` o `critical`: los 4 controles son obligatorios.
 
-Un control que se ejecuta y **no produce hallazgos** indica que la herramienta
-analizó el servicio y no encontró vulnerabilidades de ese tipo. Esto **no es una
-brecha de cobertura** — es el resultado esperado en una aplicación bien configurada.
-La diferencia respecto a un control "no ejecutado" es fundamental:
+### Cómo se operacionaliza la norma en el pipeline
 
-| Situación | Interpretación | Estado ANF |
+ISO/IEC 27034 no prescribe valores numéricos — define el marco. El pipeline lo
+implementa en tres puntos concretos y auditables:
+
+| Punto | Dónde ocurre | Evidencia en esta corrida |
 |---|---|---|
-| Control ejecutado, 0 hallazgos | Sin vulnerabilidades detectadas ✅ | Cumplido |
-| Control ejecutado, N hallazgos | Vulnerabilidades detectadas — ver gate | Cumplido |
-| Control no ejecutado | No se pudo verificar — posible brecha | ⚠️ Pendiente |
-
-> **Nota sobre TLOT/ALOT:** el modelo de puntuación TLOT/ALOT de versiones anteriores
-> fue reemplazado por el gate SSVC+EPSS+KEV (sección anterior) porque dependía de
-> constantes numéricas (0.50/0.65/0.80/0.95) no prescritas por ISO/IEC 27034-1:2011.
-> ISO/IEC 27034 se mantiene como marco de trazabilidad — su valor está en vincular
-> cada hallazgo al control que lo detectó, no en producir una puntuación numérica.
+| **1. ANF** | `detector.py` → `scan_config.json` | {len(required)} ASC obligatorios definidos para `criticality={criticality}` |
+| **2. asc_id** | `normalizer.py` → `findings.json` | Cada hallazgo etiquetado con el ASC que lo detectó |
+| **3. Auditoría** | Este reporte | {len(exec_req)}/{len(required)} controles obligatorios verificados |
 
 """
 
