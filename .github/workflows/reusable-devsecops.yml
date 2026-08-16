@@ -763,5 +763,5 @@ jobs:
           elif [ "$DECISION" = "CONDITIONAL" ]; then
             echo "⚠️  CONDITIONAL — revisar SECURITY_REPORT.md antes de promover a producción."
           else
-            echo "✅ PASS — El despliegue puede proceder."
+            echo "✅ PASS — El despliegue puede proceder"
           fi
