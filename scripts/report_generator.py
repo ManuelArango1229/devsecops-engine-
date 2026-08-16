@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-report_generator.py – Generador de Reporte Final en Markdown
-Trabajo de Grado – Universidad del Valle 2026
+report_generator.py — Generador de Reporte Final en Markdown
+DevSecOps Engine v1.3 — Trabajo de Grado — Universidad del Valle 2026
+Jhojan Stiven Castaño Jejen & Juan Manuel Arango Rodas
 """
 
 import json
@@ -9,80 +10,123 @@ import argparse
 import os
 from datetime import datetime
 
-SEVERITY_ICONS = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢", "INFO": "⚪"}
+# ── Constantes de presentación ────────────────────────────────────────────────
+SEVERITY_ICONS = {
+    "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢", "INFO": "⚪"
+}
 DECISION_ICONS = {"PASS": "✅", "FAIL": "❌", "CONDITIONAL": "⚠️"}
 COVERAGE_ICONS = {"buena": "✅", "parcial": "🟡", "ninguna": "❌"}
 
+# ASCs canónicos que el pipeline puede ejecutar, con su descripción
+ASC_CATALOG = {
+    "ASC-SAST-001":    ("Semgrep OSS",   "Análisis estático de código fuente"),
+    "ASC-SCA-001":     ("Trivy",         "Análisis de componentes y dependencias (CVEs)"),
+    "ASC-DAST-001":    ("OWASP ZAP",     "Análisis dinámico en tiempo de ejecución"),
+    "ASC-PENTEST-001": ("Nuclei v3",     "Validación activa con templates de pentest"),
+}
+
 TOOL_META = {
     "semgrep": {
-        "name":     "Semgrep (SAST)",
-        "type":     "Análisis Estático de Código",
-        "icon":     "🔐",
+        "name": "Semgrep (SAST)", "type": "Análisis Estático de Código",
+        "icon": "🔐", "asc": "ASC-SAST-001",
         "dedup_reason": (
-            "Semgrep analiza el código fuente del repositorio del engine. "
-            "Las deduplicaciones eliminan la misma regla disparada en múltiples "
-            "archivos del mismo módulo, conservando solo la primera ocurrencia por "
-            "regla + ruta de archivo."
+            "Semgrep analiza el código fuente del repositorio consumidor. "
+            "La deduplicación elimina la misma regla disparada en múltiples archivos "
+            "del mismo módulo, conservando solo la primera ocurrencia por regla + ruta."
         ),
     },
     "trivy": {
-        "name":     "Trivy (SCA)",
-        "type":     "Análisis de Componentes de Software",
-        "icon":     "🔬",
+        "name": "Trivy (SCA)", "type": "Análisis de Componentes de Software",
+        "icon": "🔬", "asc": "ASC-SCA-001",
         "dedup_reason": (
-            "La misma CVE sobre el mismo paquete y versión puede aparecer una vez por "
-            "ruta de instalación, pero tras deduplicar por `CVE + paquete + target` "
-            "queda una sola entrada. Los hallazgos removidos no son falsos positivos "
-            "sino instancias duplicadas de la misma vulnerabilidad real."
+            "La misma CVE sobre el mismo paquete puede aparecer una vez por ruta de "
+            "instalación. Tras deduplicar por CVE + paquete + target queda una sola "
+            "entrada. Los removidos son instancias duplicadas, no falsos positivos."
         ),
     },
     "zap": {
-        "name":     "OWASP ZAP (DAST)",
-        "type":     "Análisis Dinámico en Tiempo de Ejecución",
-        "icon":     "🌐",
+        "name": "OWASP ZAP (DAST)", "type": "Análisis Dinámico en Ejecución",
+        "icon": "🌐", "asc": "ASC-DAST-001",
         "dedup_reason": (
-            "ZAP realiza un escaneo baseline pasivo. Cada alerta representa un "
-            "tipo de misconfiguration o header faltante único — por eso la "
-            "deduplicación no elimina ningún hallazgo: todas las alertas tienen "
-            "títulos distintos. El conteo de instancias dentro de cada alerta "
-            "indica cuántas URLs presentan el mismo problema."
+            "ZAP realiza escaneo baseline pasivo. Cada alerta representa un tipo de "
+            "misconfiguration único — por eso la deduplicación raramente elimina "
+            "hallazgos: todas las alertas suelen tener títulos distintos."
         ),
     },
     "nuclei": {
-        "name":     "Nuclei (Pentesting)",
-        "type":     "Validación Activa de Templates",
-        "icon":     "🎯",
+        "name": "Nuclei (Pentesting)", "type": "Validación Activa de Templates",
+        "icon": "🎯", "asc": "ASC-PENTEST-001",
         "dedup_reason": (
-            "Nuclei ejecuta sus templates contra la URL base más todas las rutas "
-            "descubiertas por el reconocimiento. El mismo template puede disparar "
-            "en el mismo endpoint más de una vez dentro del mismo run, generando "
-            "entradas duplicadas en el JSON de salida. Tras deduplicar por "
-            "`template + endpoint`, se conserva solo una entrada por hallazgo único."
+            "Nuclei puede disparar el mismo template en el mismo endpoint varias veces "
+            "dentro del mismo run. Tras deduplicar por template + endpoint se conserva "
+            "solo una entrada por hallazgo único."
         ),
     },
 }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
+# ── Utilidades ────────────────────────────────────────────────────────────────
 def sev_order(s):
-    return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"].index(s) \
-        if s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] else 99
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    return order.index(s) if s in order else 99
 
 def pct(part, total):
-    return f"{part/total*100:.1f}%" if total else "0.0%"
+    return f"{part / total * 100:.1f}%" if total else "0.0%"
 
 def bar(part, total, width=20):
     filled = int(part / total * width) if total else 0
     return "█" * filled + "░" * (width - filled)
 
-def clean_html(text):
-    for tag in ["<p>", "</p>", "<ul>", "</ul>", "<li>", "</li>", "<br>", "<br/>"]:
-        text = text.replace(tag, " " if tag in ["<p>", "</p>", "<li>"] else "")
-    return text.strip()
+
+# ── Construcción del bloque ISO 27034 ─────────────────────────────────────────
+def build_iso27034_traceability(scan_config, findings_list):
+    """
+    Construye el bloque de trazabilidad ISO/IEC 27034 directamente desde
+    scan_config.json y findings.json.
+    gate.py no escribe este bloque, así que lo calculamos aquí.
+    """
+    anf          = scan_config.get("iso27034_anf", {})
+    required_ids = anf.get("required_ascs", [])
+    optional_ids = anf.get("optional_ascs", [])
+
+    # Si el detector no generó el ANF, usamos los 4 ASCs canónicos como requeridos
+    if not required_ids:
+        required_ids = list(ASC_CATALOG.keys())
+
+    all_asc_ids  = required_ids + [a for a in optional_ids if a not in required_ids]
+    executed_set = {f.get("asc_id") for f in findings_list if f.get("asc_id")}
+
+    breakdown = []
+    for asc in all_asc_ids:
+        tool_name, tool_desc = ASC_CATALOG.get(asc, ("Herramienta", "Control de seguridad"))
+        findings_for_asc = [f for f in findings_list if f.get("asc_id") == asc]
+        breakdown.append({
+            "asc_id":          asc,
+            "required":        asc in required_ids,
+            "status":          "executed" if asc in executed_set else "not_executed",
+            "tool":            tool_name,
+            "description":     tool_desc,
+            "findings_count":  len(findings_for_asc),
+            "severity_dist":   {
+                sev: sum(1 for f in findings_for_asc if f.get("severity") == sev)
+                for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+                if any(f.get("severity") == sev for f in findings_for_asc)
+            },
+        })
+
+    return {
+        "ascs_executed":  list(executed_set),
+        "asc_breakdown":  breakdown,
+        "language":       scan_config.get("language", "unknown"),
+        "criticality":    scan_config.get("business_criticality", "medium"),
+        "scan_mode":      scan_config.get("scan_mode", "unknown"),
+        "anf_defined":    bool(anf),
+    }
 
 
-# ── Secciones del reporte ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIONES DEL REPORTE
+# ══════════════════════════════════════════════════════════════════════════════
 
 def section_header(findings_data, ai_eval_data, gate_data):
     final_decision = gate_data.get("decision", "UNKNOWN")
@@ -96,16 +140,24 @@ def section_header(findings_data, ai_eval_data, gate_data):
     tokens         = ai_eval_data.get("tokens_used", {})
     evaluation     = ai_eval_data.get("evaluation", {})
 
-    # FIX: ya no depende de un módulo externo iso27034.py; refleja si el
-    # bloque de trazabilidad real (asc_id / ASCs ejecutados) está presente.
-    iso_traza_ok = bool(gate_data.get("iso27034_traceability"))
+    tra         = gate_data.get("iso27034_traceability", {})
+    breakdown   = tra.get("asc_breakdown", [])
+    req         = [b for b in breakdown if b.get("required")]
+    exec_req    = [b for b in req if b.get("status") == "executed"]
+    if breakdown:
+        iso_line = f"✅ {len(exec_req)}/{len(req)} ASC obligatorios ejecutados"
+    else:
+        iso_line = "⚠️ Sin datos de trazabilidad en esta corrida"
+
+    enrichment      = ai_eval_data.get("ssvc_enrichment", {})
+    hybrid_status   = "✅ Motor híbrido activo" if enrichment.get("used") else "⚠️ Evaluador estático (fallback)"
 
     return f"""# 🔐 Reporte de Seguridad DevSecOps
 ## {decision_icon} Decisión de Despliegue: **{final_decision}**
 
 ---
 
-> **Generado automáticamente por el pipeline DevSecOps – Universidad del Valle 2026**
+> **Generado automáticamente por el DevSecOps Engine v1.3 — Universidad del Valle 2026**
 
 | Campo | Valor |
 |---|---|
@@ -115,9 +167,9 @@ def section_header(findings_data, ai_eval_data, gate_data):
 | **Pipeline Run** | `{pipeline_run}` |
 | **Timestamp** | `{timestamp}` |
 | **Modelo IA** | `{ai_model}` |
-| **Tokens utilizados** | `{tokens.get('total', 0):,}` (prompt: {tokens.get('prompt',0):,} / completion: {tokens.get('completion',0):,}) |
-| **Versión del prompt** | `{ai_eval_data.get('prompt_version', '2.0')}` |
-| **ISO/IEC 27034** | `{'✅ Trazabilidad activa (asc_id)' if iso_traza_ok else '⚠️ Sin datos de trazabilidad en esta corrida'}` |
+| **Tokens utilizados** | `{tokens.get('total', 0):,}` (prompt: {tokens.get('prompt', 0):,} / completion: {tokens.get('completion', 0):,}) |
+| **Motor IA híbrido** | {hybrid_status} |
+| **ISO/IEC 27034 — Trazabilidad** | {iso_line} |
 
 ---
 
@@ -139,16 +191,12 @@ def section_gate(gate_data, ai_eval_data):
     risk_level     = evaluation.get("risk_level", "N/A")
     fp_estimate    = evaluation.get("false_positive_estimate", "N/A")
 
-    # FIX: se elimina la referencia a TLOT/ALOT (modelo descartado, ver
-    # ver seccion 4.6.3 de la tesis). En su lugar se resume la trazabilidad real de
-    # ISO/IEC 27034 (ASCs obligatorios vs. ejecutados), calculada a partir
-    # de iso27034_traceability.asc_breakdown.
     tra       = gate_data.get("iso27034_traceability", {})
     breakdown = tra.get("asc_breakdown", [])
-    required  = [b for b in breakdown if b.get("required")]
-    executed_req = [b for b in required if b.get("status") == "executed"]
+    req       = [b for b in breakdown if b.get("required")]
+    exec_req  = [b for b in req if b.get("status") == "executed"]
     if breakdown:
-        iso_line = f"`{len(executed_req)}/{len(required)}` ASC obligatorios ejecutados (ver sección de trazabilidad)"
+        iso_line = f"`{len(exec_req)}/{len(req)}` ASC obligatorios ejecutados (ver sección ISO/IEC 27034)"
     else:
         iso_line = "Sin datos de trazabilidad para esta corrida"
 
@@ -190,9 +238,7 @@ def section_stats(summary, tools_executed):
     sev_rows = ""
     for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
         count = by_sev.get(sev, 0)
-        p     = pct(count, total)
-        b     = bar(count, total, 15)
-        sev_rows += f"| {SEVERITY_ICONS.get(sev)} {sev} | {count} | {p} | `{b}` |\n"
+        sev_rows += f"| {SEVERITY_ICONS.get(sev)} {sev} | {count} | {pct(count, total)} | `{bar(count, total, 15)}` |\n"
 
     tool_rows = ""
     for tool in ["semgrep", "trivy", "zap", "nuclei"]:
@@ -200,19 +246,16 @@ def section_stats(summary, tools_executed):
         raw     = tools_executed.get(tool, 0)
         dedup   = by_tool.get(tool, 0)
         removed = raw - dedup
-        p_rm    = pct(removed, raw) if raw > 0 else "—"
         status  = "✅ Ejecutado" if raw > 0 else "⚠️ Sin hallazgos"
         tool_rows += (
             f"| {meta.get('icon','')} {meta.get('name', tool)} "
-            f"| {raw} | {dedup} | {removed} | {p_rm} | {status} |\n"
+            f"| `{meta.get('asc','')}` "
+            f"| {raw} | {dedup} | {removed} | {pct(removed, raw) if raw else '—'} | {status} |\n"
         )
 
     cat_rows = ""
-    sorted_cats = sorted(by_cat.items(), key=lambda x: x[1], reverse=True)
-    for cat, count in sorted_cats[:5]:
-        p = pct(count, total)
-        b = bar(count, total, 12)
-        cat_rows += f"| `{cat}` | {count} | {p} | `{b}` |\n"
+    for cat, count in sorted(by_cat.items(), key=lambda x: x[1], reverse=True)[:5]:
+        cat_rows += f"| `{cat}` | {count} | {pct(count, total)} | `{bar(count, total, 12)}` |\n"
 
     return f"""---
 
@@ -224,14 +267,15 @@ def section_stats(summary, tools_executed):
 |---|---|---|---|
 {sev_rows}| ─ | **{total}** | **100%** | |
 
-### Cobertura por Herramienta
+### Cobertura por Herramienta y ASC ISO/IEC 27034
 
-> La columna **"Removidos"** indica hallazgos eliminados por deduplicación (no son falsos positivos — son instancias duplicadas de la misma vulnerabilidad).
+> Cada herramienta tiene asignado un ASC (Application Security Control) de ISO/IEC 27034.
+> La columna **Removidos** indica duplicados eliminados, no falsos positivos.
 
-| Herramienta | Raw | Únicos | Removidos | % Removidos | Estado |
-|---|---|---|---|---|---|
+| Herramienta | ASC ISO 27034 | Raw | Únicos | Removidos | % Dedup | Estado |
+|---|---|---|---|---|---|---|
 {tool_rows}
-### Top Categorías OWASP Top 10
+### Top 5 Categorías OWASP Top 10
 
 | Categoría | Hallazgos | % del total | Proporción |
 |---|---|---|---|
@@ -249,8 +293,10 @@ def section_dedup_explanation(tools_executed, summary):
 
 ## 🔄 Metodología de Deduplicación
 
-> El normalizador aplica deduplicación para evitar el doble conteo de vulnerabilidades detectadas por múltiples instancias de la misma herramienta.
-> **Total raw:** {total_raw} hallazgos → **Total único:** {total_dedup} hallazgos → **Eliminados:** {removed} ({pct(removed, total_raw)} de reducción)
+> El normalizador aplica deduplicación para evitar el doble conteo de vulnerabilidades
+> detectadas por múltiples instancias de la misma herramienta.
+>
+> **Total raw:** {total_raw} hallazgos → **Total único:** {total_dedup} → **Eliminados:** {removed} ({pct(removed, total_raw)} de reducción)
 
 """
     for tool in ["trivy", "zap", "nuclei", "semgrep"]:
@@ -258,35 +304,29 @@ def section_dedup_explanation(tools_executed, summary):
         raw       = tools_executed.get(tool, 0)
         dedup     = by_tool.get(tool, 0)
         removed_t = raw - dedup
-        p_rm      = pct(removed_t, raw) if raw > 0 else "0%"
-
         md += f"### {meta.get('icon','')} {meta.get('name', tool)} — {meta.get('type','')}\n\n"
-        md += f"- **Raw:** {raw} hallazgos detectados | **Únicos tras dedup:** {dedup} | **Removidos:** {removed_t} ({p_rm})\n"
-        md += f"- **Criterio de dedup aplicado:** `tool + título + endpoint/archivo`\n\n"
+        md += f"- **Raw:** {raw} | **Únicos:** {dedup} | **Removidos:** {removed_t} ({pct(removed_t, raw) if raw else '0%'})\n"
+        md += f"- **Criterio:** `tool + título + endpoint/archivo`\n\n"
         md += f"> {meta.get('dedup_reason', '')}\n\n"
 
     return md
 
 
 def section_recon(recon_data):
-    if not recon_data or (
-        recon_data.get("schema_version") == "1.0" and not recon_data.get("target_url")
-    ):
+    if not recon_data or not recon_data.get("target_url"):
         return ""
 
-    target_url      = recon_data.get("target_url", "N/A")
-    nmap            = recon_data.get("nmap", {})
-    routes          = recon_data.get("route_discovery", {})
-    fingerprint     = recon_data.get("fingerprint", {})
-    waf             = recon_data.get("waf", {})
-    attack_surf     = recon_data.get("attack_surface", {})
-    recon_sum       = recon_data.get("summary", {})
+    target_url  = recon_data.get("target_url", "N/A")
+    nmap        = recon_data.get("nmap", {})
+    routes      = recon_data.get("route_discovery", {})
+    fingerprint = recon_data.get("fingerprint", {})
+    waf         = recon_data.get("waf", {})
+    recon_sum   = recon_data.get("summary", {})
 
-    open_ports      = recon_sum.get("open_ports", [])
-    technologies    = recon_sum.get("technologies", [])
-    missing_hdrs    = recon_sum.get("missing_security_headers", [])
-    waf_present     = recon_sum.get("waf_present", False)
-    attack_findings = attack_surf.get("findings", [])
+    open_ports   = recon_sum.get("open_ports", [])
+    technologies = recon_sum.get("technologies", [])
+    missing_hdrs = recon_sum.get("missing_security_headers", [])
+    waf_present  = recon_sum.get("waf_present", False)
 
     services = nmap.get("services", {})
     if services:
@@ -295,16 +335,16 @@ def section_recon(recon_data):
             interesting  = "⚠️ Sí" if info.get("interesting") else "No"
             ports_table += f"| `{port}` | {info.get('service','?')} | {info.get('version','N/A')[:40]} | {interesting} |\n"
     else:
-        ports_table = f"_Puerto {open_ports[0] if open_ports else 'N/A'} detectado (nmap no disponible o bloqueado en CI)_\n"
+        ports_table = f"_Puerto {open_ports[0] if open_ports else 'N/A'} detectado._\n"
 
     discovered_routes  = routes.get("discovered_routes", [])
     interesting_routes = routes.get("interesting_routes", [])
 
     if discovered_routes:
-        routes_section  = f"Se descubrieron **{len(discovered_routes)} rutas** activas. "
-        routes_section += f"De estas, **{len(interesting_routes)} son de interés** (retornaron 200/201).\n\n"
+        routes_section  = f"Se descubrieron **{len(discovered_routes)} rutas** activas, "
+        routes_section += f"**{len(interesting_routes)} de interés**.\n\n"
         if interesting_routes:
-            routes_section += "| Ruta sensible | Estado |\n|---|---|\n"
+            routes_section += "| Ruta | Estado |\n|---|---|\n"
             for r in interesting_routes[:15]:
                 flag = "⚠️" if any(
                     k in r.lower() for k in
@@ -312,16 +352,15 @@ def section_recon(recon_data):
                 ) else "ℹ️"
                 routes_section += f"| `{r}` | {flag} Accesible |\n"
     else:
-        routes_section = "_No se ejecutó descubrimiento de rutas (ffuf/gobuster no disponible)._\n"
+        routes_section = "_No se ejecutó descubrimiento de rutas._\n"
 
     present_hdrs  = fingerprint.get("security_headers", {}).get("present", [])
-    headers_table = "| Header de Seguridad | Estado |\n|---|---|\n"
     all_headers   = [
-        "content-security-policy", "strict-transport-security",
-        "x-frame-options", "x-content-type-options",
-        "referrer-policy", "permissions-policy",
-        "cross-origin-embedder-policy", "cross-origin-opener-policy",
+        "content-security-policy","strict-transport-security","x-frame-options",
+        "x-content-type-options","referrer-policy","permissions-policy",
+        "cross-origin-embedder-policy","cross-origin-opener-policy",
     ]
+    headers_table = "| Header de Seguridad | Estado |\n|---|---|\n"
     for h in all_headers:
         if h in present_hdrs:
             headers_table += f"| `{h}` | ✅ Presente |\n"
@@ -330,8 +369,10 @@ def section_recon(recon_data):
         else:
             headers_table += f"| `{h}` | ⚪ No verificado |\n"
 
+    attack_surf     = recon_data.get("attack_surface", {})
+    attack_findings = attack_surf.get("findings", [])
     if attack_findings:
-        attack_section  = "| Severidad | Tipo | Detalle |\n|---|---|---|\n"
+        attack_section = "| Severidad | Tipo | Detalle |\n|---|---|---|\n"
         for f in attack_findings:
             icon = SEVERITY_ICONS.get(f.get("severity","INFO"), "⚪")
             attack_section += (
@@ -346,9 +387,8 @@ def section_recon(recon_data):
 
 ## 🕵️ Fase de Reconocimiento Activo
 
-> El reconocimiento activo se ejecuta antes del escaneo dinámico para descubrir la superficie de ataque real y enriquecer los targets de Nuclei y ZAP.
-
-### Objetivo analizado
+> El reconocimiento activo descubre la superficie de ataque real antes del escaneo
+> dinámico, enriqueciendo los targets de Nuclei y ZAP.
 
 | Campo | Valor |
 |---|---|
@@ -357,25 +397,22 @@ def section_recon(recon_data):
 | **Puerto** | `{recon_data.get('port', 'N/A')}` |
 | **WAF detectado** | {'✅ Sí — ' + str(waf.get('waf_name','desconocido')) if waf_present else '❌ No detectado'} |
 | **Servidor** | `{fingerprint.get('server', 'N/A') or 'No detectado'}` |
-| **Título de la app** | `{fingerprint.get('title', 'N/A') or 'N/A'}` |
-| **Tecnologías detectadas** | {', '.join(f'`{t}`' for t in technologies[:6]) if technologies else '_No detectadas_'} |
+| **Tecnologías** | {', '.join(f'`{t}`' for t in technologies[:6]) if technologies else '_No detectadas_'} |
 | **Targets generados para Nuclei** | {len(recon_data.get('nuclei_targets', []))} URLs |
 
-### Escaneo de Puertos (nmap)
+### Puertos detectados (nmap)
 
 {ports_table}
 
-### Descubrimiento de Rutas
+### Rutas descubiertas
 
 {routes_section}
 
-### Headers de Seguridad HTTP
+### Headers de seguridad HTTP
 
 {headers_table}
 
-> Los headers faltantes son confirmados por los hallazgos de ZAP y Nuclei.
-
-### Hallazgos de Superficie de Ataque
+### Superficie de ataque
 
 {attack_section}
 
@@ -409,7 +446,7 @@ def section_ai_analysis(evaluation, ai_eval_data):
 
     key_findings = evaluation.get("key_findings", [])
     if key_findings:
-        kf_rows = "| Severidad | Hallazgo | CVSS | Explotable remoto | Auth requerida | Exploit público | Categoría |\n|---|---|---|---|---|---|---|\n"
+        kf_rows = "| Severidad | Hallazgo | CVSS | Remoto | Auth | Exploit | Categoría |\n|---|---|---|---|---|---|---|\n"
         for f in key_findings:
             icon    = SEVERITY_ICONS.get(f.get("severity"), "⚪")
             title   = f.get("title", "Unknown")[:45]
@@ -436,7 +473,7 @@ def section_ai_analysis(evaluation, ai_eval_data):
 
 {owasp_rows}
 
-### Análisis de Cobertura por Tipo de Herramienta
+### Cobertura por Tipo de Herramienta
 
 | Tipo de análisis | Cobertura | Estado |
 |---|---|---|
@@ -475,7 +512,7 @@ _No se identificaron cadenas de ataque combinadas._
     for chain in attack_chains:
         icon       = SEVERITY_ICONS.get(chain.get("severity"), "⚪")
         likelihood = likelihood_map.get(chain.get("likelihood",""), chain.get("likelihood","N/A"))
-        md += f"### {icon} {chain.get('chain_id','CHAIN')} – {chain.get('title','Sin título')}\n\n"
+        md += f"### {icon} {chain.get('chain_id','CHAIN')} — {chain.get('title','Sin título')}\n\n"
         md += "| Campo | Valor |\n|---|---|\n"
         md += f"| **Severidad combinada** | {chain.get('severity','N/A')} |\n"
         md += f"| **Probabilidad** | {likelihood} |\n"
@@ -525,49 +562,42 @@ _No se identificaron prioridades específicas._
     return md
 
 
-
-def section_ssvc(gate_data: dict) -> str:
-    """
-    Sección SSVC + EPSS + CISA KEV — tercer gate del pipeline.
-    Reemplaza el modelo TLOT/ALOT como mecanismo de decisión cuantificable
-    sin constantes arbitrarias.
-    Ref: Al Haddad et al. (2025), Kausar et al. (2025), Yoon et al. (2023)
-    """
+def section_ssvc(gate_data):
     gc   = gate_data.get("gate_comparison", {})
     ssvc = gc.get("ssvc", {})
     if not ssvc or ssvc.get("method") != "ssvc_epss_kev":
         return ""
 
-    dec  = ssvc.get("decision", "?")
-    agg  = ssvc.get("aggregate_action", "?")
-    ac   = ssvc.get("action_counts", {})
-    f1m  = ssvc.get("f1_metrics", {})
-    ds   = ssvc.get("data_sources", {})
-    mw   = ssvc.get("mission_wellbeing", "?")
-    crit = ssvc.get("criticality", "?")
-    dec_icon = DECISION_ICONS.get(dec, "❓")
+    dec          = ssvc.get("decision", "?")
+    agg          = ssvc.get("aggregate_action", "?")
+    ac           = ssvc.get("action_counts", {})
+    f1m          = ssvc.get("f1_metrics", {})
+    ds           = ssvc.get("data_sources", {})
+    mw           = ssvc.get("mission_wellbeing", "?")
+    crit         = ssvc.get("criticality", "?")
+    dec_icon     = DECISION_ICONS.get(dec, "❓")
+    total_class  = sum(ac.values()) if ac else 0
 
-    # Distribución de acciones
-    total_classified = sum(ac.values()) if ac else 0
     def pct_ac(k):
-        return f"{ac.get(k,0)/total_classified*100:.1f}%" if total_classified else "0%"
+        return f"{ac.get(k,0)/total_class*100:.1f}%" if total_class else "0%"
 
-    # Top Act findings table
     act_rows = ""
     for a in ssvc.get("top_act_findings", [])[:8]:
-        tool  = a.get("tool", "")
-        title = a.get("title", "")[:65]
-        expl  = a.get("exploitation", "?")
-        auto  = a.get("automatable", "?")
-        imp   = a.get("tech_impact", "?")
-        act_rows += f"| `{tool}` | {title} | {expl} | {auto} | {imp} | **Act** |\n"
+        act_rows += (
+            f"| `{a.get('tool','')}` "
+            f"| {a.get('title','')[:65]} "
+            f"| {a.get('exploitation','?')} "
+            f"| {a.get('automatable','?')} "
+            f"| {a.get('tech_impact','?')} "
+            f"| **Act** |\n"
+        )
+    if not act_rows:
+        act_rows = "| — | Sin hallazgos Act — bajo perfil de explotación | — | — | — | PASS |\n"
 
-    # F1 metrics block
-    f1_block = ""
     n_eval = f1m.get("cves_evaluated", 0)
     if n_eval and n_eval > 0:
         f1_block = f"""
-### Métricas Formales — Dimensión Exploitation (F1 Score)
+### 📊 Métricas Formales — Dimensión Exploitation (F1 Score)
 
 > Calculadas sobre CVEs con CISA KEV o EPSS disponible como *ground truth*.
 > Metodología: Al Haddad et al. (2025) — arXiv 2510.18508.
@@ -584,46 +614,49 @@ def section_ssvc(gate_data: dict) -> str:
 | Falsos negativos | `{f1m.get('false_negatives', 0)}` | Clasificados not_active, ground truth active |
 
 > **Ground truth:** CVE en CISA KEV **o** EPSS ≥ 0.5 → activo.
-> **Nota:** hallazgos sin CVE ID (Semgrep/ZAP) excluidos del cálculo formal (sin ground truth verificable).
+> **Nota:** hallazgos sin CVE ID (Semgrep/ZAP) excluidos del cálculo formal por ausencia
+> de ground truth verificable en EPSS/KEV.
 """
     else:
         f1_block = """
-### Métricas Formales — Dimensión Exploitation
+### 📊 Métricas Formales — Dimensión Exploitation
 
 > No se encontraron CVEs con EPSS disponible para calcular F1 en este caso.
-> Los hallazgos principales provienen de Semgrep/ZAP (sin CVE ID) o de CVEs sin cobertura EPSS.
+> Esto es esperado cuando los hallazgos provienen principalmente de Semgrep/ZAP
+> (sin CVE ID) o cuando todos los CVEs tienen EPSS bajo (paradoja de clases
+> desbalanceadas: todos son verdaderos negativos → accuracy = 1.00, F1 = 0.00).
 """
-
-    if not act_rows:
-        act_rows = "| — | Sin hallazgos Act — bajo perfil de explotación | — | — | — | PASS |\n"
 
     return f"""---
 
 ## 🔬 Gate SSVC + EPSS + CISA KEV
 
-> **Fundamento académico:** reemplaza el modelo TLOT/ALOT con constantes arbitrarias por un árbol
-> de decisión publicado por CISA/SEI-CERT que elimina la saturación y permite calcular F1 formal.
-> **Ref:** Al Haddad et al. (2025), Kausar et al. (2025), Yoon et al. (2023), Rajapakse et al. (2021).
+> **Tercer mecanismo de decisión del pipeline.** Reemplaza el modelo TLOT/ALOT que
+> dependía de constantes arbitrarias (0.50/0.65/0.80/0.95) y saturaba en ALOT=0.35
+> en todos los casos evaluados. SSVC v2.1 fue publicado por CISA/SEI-CERT y no
+> requiere constantes propias.
+>
+> **Referencias:** Al Haddad et al. (2025), Kausar et al. (2025), Yoon et al. (2023).
 
 ### Resultado del Gate SSVC
 
 | Indicador | Valor |
 |---|---|
 | **Decisión** | {dec_icon} **{dec}** |
-| **Acción agregada SSVC** | `{agg}` (máximo sobre todos los hallazgos) |
-| **Mission & Wellbeing** | `{mw}` (derivado de criticality=`{crit}`) |
-| **Fuente de datos KEV** | CISA Known Exploited Vulnerabilities ({ds.get('cisa_kev_entries', 0):,} entradas) |
-| **Fuente de datos EPSS** | FIRST.org API ({ds.get('epss_scores_fetched', 0)} CVEs consultados) |
+| **Acción agregada** | `{agg}` (máximo sobre todos los hallazgos evaluados) |
+| **Mission & Wellbeing** | `{mw}` (derivado de `criticality={crit}`) |
+| **CISA KEV** | {ds.get('cisa_kev_entries', 0):,} entradas consultadas |
+| **EPSS** | {ds.get('epss_scores_fetched', 0)} CVEs consultados vía FIRST.org API |
 
 ### Distribución de Acciones SSVC
 
-| Acción | Hallazgos | % | Gate | Significado |
+| Acción | Hallazgos | % | Gate | Significado operativo |
 |---|---|---|---|---|
 | **Act** | `{ac.get('Act', 0)}` | {pct_ac('Act')} | ❌ FAIL | Explotación activa o automatizable con impacto total |
-| **Attend** | `{ac.get('Attend', 0)}` | {pct_ac('Attend')} | ⚠️ CONDITIONAL | Explotación probable, requiere atención pronto |
-| **Track-star** | `{ac.get('Track*', 0)}` | {pct_ac('Track*')} | ⚠️ CONDITIONAL | Monitorear activamente — riesgo controlado |
+| **Attend** | `{ac.get('Attend', 0)}` | {pct_ac('Attend')} | ⚠️ CONDITIONAL | Explotación probable a corto plazo |
+| **Track*** | `{ac.get('Track*', 0)}` | {pct_ac('Track*')} | ⚠️ CONDITIONAL | Monitoreo activo — riesgo controlado |
 | **Track** | `{ac.get('Track', 0)}` | {pct_ac('Track')} | ✅ PASS | Sin explotación activa conocida |
-| **Total evaluados** | `{total_classified}` | 100% | {dec_icon} **{dec}** | Decisión = acción máxima |
+| **Total evaluados** | `{total_class}` | 100% | {dec_icon} **{dec}** | Decisión = acción máxima |
 
 ### Hallazgos que requieren acción inmediata (Act)
 
@@ -631,40 +664,33 @@ def section_ssvc(gate_data: dict) -> str:
 |---|---|---|---|---|---|
 {act_rows}
 {f1_block}
-### Ventajas sobre TLOT/ALOT (modelo anterior)
+
+### Por qué SSVC reemplaza a TLOT/ALOT
 
 | Aspecto | TLOT/ALOT (reemplazado) | SSVC + EPSS + KEV (actual) |
 |---|---|---|
-| Constantes | 0.50/0.65/0.80/0.95 y −0.40/−0.25/−0.10/−0.15 definidas por autores | Árbol publicado por CISA — sin constantes propias |
-| Saturación | ALOT = 0.35 idéntico en todos los casos | Track/Attend/Act varían por hallazgo y por perfil |
+| Constantes | 0.50/0.65/0.80/0.95 definidas por autores | Árbol publicado por CISA — sin constantes propias |
+| Saturación | ALOT = 0.35 idéntico en todos los casos | Track/Attend/Act varían por hallazgo |
 | Métricas formales | Imposible (sin ground truth) | F1, precisión, recall vs CISA KEV + EPSS |
-| Diferenciación | Los 5 casos originales: FAIL uniforme | Casos con bajo perfil de explotación → PASS/CONDITIONAL |
+| Respaldo normativo | ISO/IEC 27034 §7.3.4 (sin valores) | SSVC v2.1 CISA/SEI-CERT (publicado) |
 
 """
 
 
-
-
-def section_ssvc_enrichment(ai_eval_data: dict) -> str:
-    """
-    Sección que documenta el enriquecimiento SSVC/EPSS/KEV usado por el gate IA.
-    Aparece dentro del bloque de evaluación IA para mostrar el contexto empírico.
-    Ref: Al Haddad et al. (2025) – arXiv 2510.18508
-    """
+def section_ssvc_enrichment(ai_eval_data):
     enrichment = ai_eval_data.get("ssvc_enrichment", {})
     if not enrichment.get("used"):
         return ""
 
-    ev         = ai_eval_data.get("evaluation", {})
-    ssvc_val   = ev.get("ssvc_validation", [])
-    f1m        = enrichment.get("f1_metrics", {})
-    ac         = enrichment.get("action_counts", {})
+    ev       = ai_eval_data.get("evaluation", {})
+    ssvc_val = ev.get("ssvc_validation", [])
+    f1m      = enrichment.get("f1_metrics", {})
+    ac       = enrichment.get("action_counts", {})
 
     n_conf  = sum(1 for v in ssvc_val if v.get("ai_assessment") == "confirmed")
     n_over  = sum(1 for v in ssvc_val if v.get("ai_assessment") == "overestimated")
     n_under = sum(1 for v in ssvc_val if v.get("ai_assessment") == "underestimated")
 
-    # Tabla de validaciones si existen
     val_rows = ""
     for v in ssvc_val[:8]:
         assessment = v.get("ai_assessment", "")
@@ -687,11 +713,9 @@ def section_ssvc_enrichment(ai_eval_data: dict) -> str:
             f"n={f1m.get('cves_evaluated',0)} CVEs)"
         )
 
-    # Pre-compute validation block to avoid nested f-strings (Python < 3.12)
     if ssvc_val:
         val_block = (
-            f"### Validación Cruzada LLM ↔ SSVC ({len(ssvc_val)} hallazgos validados)\n\n"
-            f"El LLM analizó las clasificaciones SSVC preliminares y produjo su propio juicio:\n"
+            f"### Validación Cruzada LLM ↔ SSVC ({len(ssvc_val)} hallazgos)\n\n"
             f"**{n_conf} confirmados**, **{n_over} sobreestimados**, **{n_under} subestimados**.\n\n"
             "| SSVC Preliminar | Juicio IA | Evidencia Empírica | Razonamiento |\n"
             "|---|---|---|---|\n"
@@ -701,88 +725,73 @@ def section_ssvc_enrichment(ai_eval_data: dict) -> str:
         val_block = ""
 
     return f"""
-### 🔬 Contexto SSVC/EPSS/KEV Usado en Esta Evaluación
+### 🔬 Contexto SSVC/EPSS/KEV Usado en el Gate IA (Motor Híbrido v1.3)
 
-> **Gate híbrido IA + SSVC/EPSS/KEV** — el LLM recibió como contexto las
-> clasificaciones SSVC preliminares y datos empíricos de explotabilidad, siguiendo
-> la metodología de **Al Haddad et al. (2025)** *(arXiv 2510.18508)* que demuestra
-> que los LLMs mejoran la clasificación SSVC cuando se enriquece su contexto con
-> datos EPSS/KEV. El LLM puede validar o corregir las clasificaciones basándose
-> en el contexto específico de la aplicación.
+> Antes de invocar al LLM, el motor ejecuta `ssvc_gate.py` y enriquece el prompt
+> con clasificaciones SSVC, scores EPSS y estado KEV por hallazgo. El LLM puede
+> confirmar o corregir las clasificaciones con razonamiento contextual.
+> **Ref:** Al Haddad et al. (2025) — arXiv 2510.18508.
 
-| Métrica de Enriquecimiento | Valor |
+| Métrica | Valor |
 |---|---|
 | **CISA KEV consultado** | {enrichment.get('kev_entries', 0):,} entradas |
 | **EPSS scores obtenidos** | {enrichment.get('epss_fetched', 0)} CVEs |
 | **Hallazgos clasificados SSVC** | {enrichment.get('classified_count', 0)} |
-| **Distribución SSVC** | Act={ac.get('Act',0)}, Attend={ac.get('Attend',0)}, Track*={ac.get('Track*',0)}, Track={ac.get('Track',0)} |{f1_line}
+| **Distribución** | Act={ac.get('Act',0)}, Attend={ac.get('Attend',0)}, Track*={ac.get('Track*',0)}, Track={ac.get('Track',0)} |{f1_line}
 
 {val_block}
 """
 
 
 def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
-    """
-    Comparación de los TRES gates: tradicional, IA y SSVC+EPSS+KEV.
-    Esta es la contribución académica central del TG.
-    FIX: se elimina la variable muerta que calculaba iso_decision/iso_tlot/
-    iso_alot (nunca se imprimían y correspondían al modelo TLOT/ALOT
-    descartado). ISO/IEC 27034 se referencia solo como trazabilidad, con
-    remisión a la sección dedicada de asc_id / ASCs ejecutados.
-    """
     trad       = gate_comparison.get("traditional", {})
     ai         = gate_comparison.get("ai_assisted", {})
-    analysis   = gate_comparison.get("analysis", {})
+    gc_analysis = gate_comparison.get("analysis", {})
     evaluation = ai_eval_data.get("evaluation", {})
 
     trad_decision = trad.get("decision", "UNKNOWN")
     ai_decision   = ai.get("decision", "UNKNOWN")
+    trad_icon     = DECISION_ICONS.get(trad_decision, "❓")
+    ai_icon       = DECISION_ICONS.get(ai_decision, "❓")
 
-    trad_icon = DECISION_ICONS.get(trad_decision, "❓")
-    ai_icon   = DECISION_ICONS.get(ai_decision, "❓")
+    ssvc     = gate_comparison.get("ssvc", {})
+    ssvc_dec = ssvc.get("decision", "N/A")
+    ssvc_agg = ssvc.get("aggregate_action", "N/A")
+    ssvc_icon = DECISION_ICONS.get(ssvc_dec, "❓")
+    f1m      = ssvc.get("f1_metrics", {})
+    f1_str   = f"`{f1m.get('f1_score',0):.3f}`" if f1m.get("cves_evaluated",0) > 0 else "N/A"
+
+    divergences = gc_analysis.get("divergences", [])
+    divergence_block = (
+        "\n".join(f"- {d}" for d in divergences)
+        if divergences else
+        "- Los tres gates concuerdan en la decisión final."
+    )
 
     trad_reasons = "\n".join(f"- {r}" for r in trad.get("reasons", []))
 
-    # SSVC data
-    ssvc      = gate_comparison.get("ssvc", {})
-    ssvc_dec  = ssvc.get("decision", "N/A")
-    ssvc_agg  = ssvc.get("aggregate_action", "N/A")
-    ssvc_icon = DECISION_ICONS.get(ssvc_dec, "❓")
-    f1m       = ssvc.get("f1_metrics", {})
-    f1_str    = f"`{f1m.get('f1_score',0):.3f}`" if f1m.get("cves_evaluated",0)>0 else "N/A"
-
-    divergences = []
-    gc_analysis = gate_comparison.get("analysis", {})
-    for d in gc_analysis.get("divergences", []):
-        divergences.append(f"- {d}")
-    divergence_block = "\n".join(divergences) if divergences else "- Los tres gates concuerdan en la decisión final."
-
     return f"""---
 
-## 🔄 Comparación: Tres Enfoques de Security Gate
+## 🔄 Comparación: Tres Enfoques del Security Gate
 
-> **Contribución central del Trabajo de Grado:** comparar empíricamente tres mecanismos de
-> decisión de despliegue. El gate tradicional como línea base, el gate IA para análisis
-> contextual, y el gate SSVC+EPSS+KEV como métrica estandarizada con F1 formal.
-> ISO/IEC 27034 se conserva para trazabilidad normativa (asc_id) — ver sección dedicada
-> más adelante en este reporte, no como un cuarto gate de decisión.
+> **Contribución central del Trabajo de Grado:** comparar empíricamente tres mecanismos
+> de decisión de despliegue sobre los mismos hallazgos normalizados. ISO/IEC 27034 se
+> conserva exclusivamente para trazabilidad normativa (campo `asc_id`) — ver sección
+> siguiente. No opera como cuarto gate de decisión.
 
 | Criterio | Gate Tradicional | Gate con IA | Gate SSVC+EPSS+KEV |
 |---|---|---|---|
 | **Decisión** | {trad_icon} {trad_decision} | {ai_icon} {ai_decision} | {ssvc_icon} {ssvc_dec} |
-| **Método** | Umbrales numéricos fijos | Evaluación contextual LLM | Árbol SSVC + EPSS + CISA KEV |
-| **Acción agregada** | N/A | N/A | `{ssvc_agg}` (Act/Attend/Track*/Track) |
-| **Métricas formales** | ❌ No | ❌ No | ✅ F1={f1_str} (vs CISA KEV) |
-| **Considera falsos positivos** | ❌ No | ✅ Estimados ({evaluation.get('false_positive_estimate','N/A')}) | ✅ EPSS filtra low-risk |
+| **Método** | Umbrales numéricos fijos | LLM con contexto SSVC/EPSS/KEV | Árbol SSVC v2.1 + EPSS + CISA KEV |
+| **Acción agregada SSVC** | N/A | N/A | `{ssvc_agg}` |
+| **Métricas formales** | ❌ No | ❌ No | ✅ F1 = {f1_str} |
 | **Evalúa explotabilidad real** | ❌ No | ✅ Semántica LLM | ✅ CISA KEV + EPSS empírico |
-| **Detecta cadenas de ataque** | ❌ No | ✅ Sí | ❌ No (por hallazgo individual) |
-| **Constantes arbitrarias** | ✅ Umbrales fijos | N/A | ❌ Ninguna (árbol CISA público) |
-| **Saturación de scores** | ✅ Posible | N/A | ❌ Elimina saturación |
-| **Transparencia** | ✅ Alta | ⚠️ Caja negra | ✅ Alta (árbol publicado CISA) |
+| **Detecta cadenas de ataque** | ❌ No | ✅ Sí | ❌ Por hallazgo individual |
+| **Considera falsos positivos** | ❌ No | ✅ Estimados ({evaluation.get('false_positive_estimate','N/A')}) | ✅ EPSS filtra low-risk |
+| **Constantes arbitrarias** | ✅ Umbrales fijos | N/A | ❌ Ninguna |
 | **Determinístico** | ✅ Sí | ❌ No | ✅ Sí |
-| **Costo computacional** | Nulo | ~$0.005/run | ~API calls gratuitas |
-| **Modelo / versión** | Reglas fijas | `{ai.get('ai_model','N/A')}` | SSVC v2.1 + FIRST.org EPSS |
-| **Confianza / score** | N/A | {ai.get('confidence',0):.0%} | {f1_str} F1 (Exploitation) |
+| **Costo por run** | ~$0 | ~$0.005 | ~$0 (APIs gratuitas) |
+| **Trazabilidad ISO/IEC 27034** | ❌ No | ❌ No | ✅ Vía `asc_id` (ver sección siguiente) |
 
 ### Divergencias entre gates
 
@@ -790,33 +799,19 @@ def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
 
 **Insight académico:** {gc_analysis.get('academic_insight','N/A')}
 
-**Análisis de la comparación:** {gc_analysis.get('comparison', analysis.get('comparison','N/A'))}
+**Análisis comparativo:** {gc_analysis.get('comparison','N/A')}
 
 **Razones del gate tradicional:**
-{trad_reasons}
-
-**Análisis de falsos positivos (IA):** {evaluation.get('false_positive_reasoning','N/A')}
-
-> **Nota sobre ISO/IEC 27034:** el modelo TLOT/ALOT fue reemplazado por SSVC+EPSS+KEV
-> para eliminar constantes arbitrarias y habilitar métricas formales. ISO/IEC 27034 se
-> conserva como marco de trazabilidad normativa: cada hallazgo mantiene su `asc_id` y
-> los ASCs ejecutados quedan registrados (ver sección siguiente).
+{trad_reasons if trad_reasons else '- No disponibles'}
 
 """
 
 
 def section_iso27034(gate_data):
     """
-    FIX COMPLETO: Sección de trazabilidad normativa ISO/IEC 27034.
-
-    Reemplaza por completo la versión anterior, que dependía de un módulo
-    externo `iso27034.py` (import opcional) y de un bloque `iso27034_evaluation`
-    con TLOT/ALOT que ya no existe en gate_decision.json. Ahora se lee
-    directamente `gate_data["iso27034_traceability"]`, que documenta la norma
-    en los TRES puntos del pipeline (detector -> ANF y ASCs obligatorios,
-    normalizador -> asc_id por hallazgo, gate/reporte -> ASCs ejecutados vs.
-    requeridos), consistente con la tesis, seccion 4.6.4 y con la respuesta a la
-    observación de la segunda evaluación sobre TLOT/ALOT.
+    Sección de trazabilidad normativa ISO/IEC 27034.
+    Lee gate_data["iso27034_traceability"] construido en generate_report()
+    desde scan_config.json + findings.json.
     """
     tra = gate_data.get("iso27034_traceability", {})
     if not tra:
@@ -824,77 +819,106 @@ def section_iso27034(gate_data):
 
 ## 📋 Trazabilidad Normativa ISO/IEC 27034
 
-> ⚠️ No se encontró el bloque `iso27034_traceability` en `gate_decision.json` para esta
-> corrida. Verifica que el detector haya generado el bloque ANF en `scan_config.json`
-> y que el gate lo esté propagando al reporte final.
+> ⚠️ No se encontró el bloque `iso27034_traceability` en esta corrida.
+> Verifica que `detector.py` haya generado el campo `iso27034_anf` en
+> `scan_config.json` y que se pase `--scan-config` al invocar este script.
 
 """
 
     executed  = tra.get("ascs_executed", [])
     breakdown = tra.get("asc_breakdown", [])
-    required  = [b.get("asc_id") for b in breakdown if b.get("required")]
+    language  = tra.get("language", "unknown")
+    criticality = tra.get("criticality", "medium")
+    scan_mode = tra.get("scan_mode", "unknown")
+    anf_defined = tra.get("anf_defined", False)
+
+    required = [b for b in breakdown if b.get("required")]
+    exec_req = [b for b in required if b.get("status") == "executed"]
+
+    gap = [b for b in required if b.get("status") != "executed"]
 
     rows = ""
     for b in breakdown:
-        asc         = b.get("asc_id", "?")
-        req_label   = "✅ Obligatorio" if b.get("required") else "⚪ Opcional"
-        status      = b.get("status", "?")
-        status_icon = "✅ Ejecutado" if status == "executed" else "⚠️ No ejecutado"
-        rows += f"| `{asc}` | {req_label} | {status_icon} |\n"
+        asc        = b.get("asc_id", "?")
+        tool       = b.get("tool", "—")
+        desc       = b.get("description", "—")
+        req_label  = "✅ Obligatorio" if b.get("required") else "⚪ Opcional"
+        status     = "✅ Ejecutado" if b.get("status") == "executed" else "⚠️ No ejecutado"
+        count      = b.get("findings_count", 0)
+        sev_dist   = b.get("severity_dist", {})
+        sev_str    = ", ".join(
+            f"{SEVERITY_ICONS.get(s,'')} {s}:{n}" for s, n in sev_dist.items()
+        ) if sev_dist else "—"
+        rows += f"| `{asc}` | {tool} | {desc} | {req_label} | {status} | {count} | {sev_str} |\n"
 
     if not rows:
-        rows = "| — | — | Sin desglose de ASC disponible para esta corrida |\n"
+        rows = "| — | — | — | — | Sin desglose disponible | — | — |\n"
 
-    gap = [b.get("asc_id") for b in breakdown
-           if b.get("required") and b.get("status") != "executed"]
     if gap:
         gap_block = (
             "### ⚠️ Brechas de cobertura detectadas\n\n"
-            "Los siguientes ASC eran obligatorios según el ANF (definido por la criticidad "
-            "declarada del servicio) pero no se ejecutaron o no reportaron hallazgos en "
-            "esta corrida:\n\n"
-            + "\n".join(f"- `{g}`" for g in gap) + "\n\n"
+            "Los siguientes ASC son obligatorios según el ANF pero no ejecutaron "
+            "hallazgos en esta corrida:\n\n"
+            + "\n".join(f"- `{b.get('asc_id')}` — {b.get('tool','?')}: {b.get('description','')}" for b in gap)
+            + "\n\n"
         )
     else:
         gap_block = (
-            "✅ No se detectaron brechas: todos los ASC obligatorios según el ANF se "
-            "ejecutaron en esta corrida.\n\n"
+            "### ✅ Cobertura completa\n\n"
+            "Todos los ASC obligatorios según el ANF se ejecutaron en esta corrida "
+            "y registraron hallazgos.\n\n"
         )
 
     return f"""---
 
 ## 📋 Trazabilidad Normativa ISO/IEC 27034
 
-> La norma se materializa en **tres puntos operativos** del pipeline, no en un único
-> campo aislado:
+> ### ¿Cómo opera ISO/IEC 27034 en este pipeline?
 >
-> 1. **Detector** (`scan_config.json`): define en el ANF (Application Normative
->    Framework) qué ASC son obligatorios según la criticidad declarada del servicio.
-> 2. **Normalizador**: etiqueta cada hallazgo individual con el `asc_id` del control
->    que lo detectó.
-> 3. **Este gate/reporte**: registra qué ASC se ejecutaron realmente frente a los
->    requeridos por el ANF, permitiendo auditar brechas de cobertura.
+> La norma **no actúa como gate de decisión** — ese rol lo cumple SSVC+EPSS+KEV.
+> ISO/IEC 27034-1:2011 se materializa en **tres puntos operativos concretos**:
 >
-> El modelo TLOT/ALOT usado en versiones anteriores del pipeline fue **reemplazado**
-> por el gate SSVC + EPSS + CISA KEV (sección anterior) porque dependía de constantes
-> numéricas no prescritas por la norma. ISO/IEC 27034 se mantiene como marco de
-> **trazabilidad**, no como mecanismo de puntuación — ver seccion 4.6.3-4.6.4 de la tesis.
+> | Punto | Componente | Qué hace |
+> |---|---|---|
+> | **1. ANF** | `detector.py` → `scan_config.json` | Define qué ASC son obligatorios según el lenguaje y la criticidad declarada del servicio |
+> | **2. asc_id** | `normalizer.py` → `findings.json` | Etiqueta cada hallazgo individual con el ASC que lo detectó |
+> | **3. Auditoría** | `report_generator.py` → este reporte | Registra qué ASC se ejecutaron frente a los requeridos por el ANF |
+>
+> Esto permite responder: *¿el pipeline ejecutó todos los controles que la norma
+> requiere para este servicio?* y auditar brechas de cobertura por corrida.
 
-### ASCs ejecutados frente a los requeridos por el ANF
+### Contexto de esta corrida
 
-| ASC | Obligatorio (ANF) | Estado en esta corrida |
-|---|---|---|
+| Campo | Valor |
+|---|---|
+| **Lenguaje detectado** | `{language}` |
+| **Criticidad declarada** | `{criticality}` |
+| **Modo de escaneo** | `{scan_mode}` |
+| **ANF definido por detector** | {'✅ Sí' if anf_defined else '⚠️ No — se usaron ASC canónicos por defecto'} |
+| **ASC obligatorios requeridos** | {len(required)} |
+| **ASC obligatorios ejecutados** | {len(exec_req)} / {len(required)} |
+
+### ASC ejecutados frente a los requeridos por el ANF
+
+| ASC | Herramienta | Descripción | Obligatorio | Estado | Hallazgos | Distribución de severidad |
+|---|---|---|---|---|---|---|
 {rows}
 
 {gap_block}
-**ASCs ejecutados en total:** `{', '.join(executed) if executed else 'ninguno registrado'}`
+
+**ASC ejecutados en esta corrida:** `{', '.join(sorted(executed)) if executed else 'ninguno registrado'}`
+
+> **Nota sobre TLOT/ALOT:** el modelo de puntuación TLOT/ALOT usado en versiones
+> anteriores del pipeline fue reemplazado por el gate SSVC+EPSS+KEV (sección anterior)
+> porque dependía de constantes numéricas (0.50/0.65/0.80/0.95) que no están prescritas
+> por ISO/IEC 27034-1:2011. La norma define los conceptos TLOT/ALOT en §7.3.4 pero no
+> asigna valores concretos. El reemplazo eliminó la saturación (ALOT=0.35 idéntico en
+> todos los casos) y habilitó las métricas F1 formales que el modelo anterior no permitía.
 
 """
 
 
 def section_findings_detail(findings, tools_executed):
-    """Sección detallada por herramienta con todos los hallazgos."""
-
     def finding_card(f):
         icon  = SEVERITY_ICONS.get(f.get("severity"), "⚪")
         sev   = f.get("severity", "?")
@@ -903,6 +927,7 @@ def section_findings_detail(findings, tools_executed):
         md   += "| Campo | Valor |\n|---|---|\n"
         md   += f"| **ID** | `{f.get('id','N/A')}` |\n"
         md   += f"| **Herramienta** | `{f.get('tool','N/A').upper()}` ({f.get('tool_type','N/A')}) |\n"
+        md   += f"| **ASC ISO/IEC 27034** | `{f.get('asc_id','N/A')}` |\n"
         md   += f"| **Categoría OWASP** | {f.get('category','N/A')} |\n"
         if f.get("cwe"):
             md += f"| **CWE** | `{f.get('cwe')}` |\n"
@@ -913,10 +938,10 @@ def section_findings_detail(findings, tools_executed):
             md += f"| **Archivo** | `{loc['file']}:{loc.get('line','?')}` |\n"
         if loc.get("endpoint"):
             md += f"| **Endpoint** | `{loc.get('method','GET')} {loc['endpoint']}` |\n"
-        if f.get("instances_count") and f.get("instances_count", 0) > 1:
+        if f.get("instances_count", 0) > 1:
             md += f"| **Instancias** | {f.get('instances_count')} URLs afectadas |\n"
         md += f"\n**Descripción:** {f.get('description','N/A')[:400]}\n\n"
-        if f.get("evidence") and f.get("evidence","").strip():
+        if f.get("evidence","").strip():
             md += f"**Evidencia:** `{f.get('evidence','')[:200]}`\n\n"
         if f.get("remediation"):
             md += f"**✅ Remediación:** {f.get('remediation','')[:300]}\n\n"
@@ -932,7 +957,7 @@ def section_findings_detail(findings, tools_executed):
         unique        = len(tool_findings)
         removed       = raw - unique
 
-        md += f"### {meta.get('icon','')} {meta.get('name', tool_key)}\n\n"
+        md += f"### {meta.get('icon','')} {meta.get('name', tool_key)} — `{meta.get('asc','')}`\n\n"
         md += f"> **Tipo:** {meta.get('type','')}  \n"
         md += f"> **Raw:** {raw} | **Únicos:** {unique} | **Deduplicados:** {removed} ({pct(removed, raw) if raw else '0%'})\n\n"
 
@@ -986,82 +1011,75 @@ def section_findings_detail(findings, tools_executed):
 
 
 def section_academic(timestamp, pipeline_run, attack_chains, tools, service="este servicio"):
-    """
-    FIX: se elimina toda referencia a TLOT/ALOT (tabla de marco normativo y
-    tabla de capacidades diferenciales) y se corrige el conteo hardcodeado
-    de "n=2 casos de estudio" (Juice Shop/FitFusion), que quedó de una de las
-    primeras corridas y ya no refleja el alcance real de la validación (9
-    casos, ver tesis seccion 5). La tabla de capacidades ahora compara los TRES
-    gates reales (Tradicional / IA / SSVC+EPSS+KEV), consistente con la
-    sección de comparación de gates más arriba en este mismo reporte.
-    """
     chains = len(attack_chains)
     return f"""---
 
 ## 🎓 Notas Académicas y Marco de Referencia
 
 Este reporte fue generado automáticamente por el pipeline DevSecOps implementado como
-Trabajo de Grado en la **Universidad del Valle – Sede Tuluá**.
+Trabajo de Grado en la **Universidad del Valle — Sede Tuluá**.
 
 ### Marco normativo y técnico
 
 | Estándar / Framework | Aplicación en este pipeline |
 |---|---|
-| **ISO/IEC 27034-1:2011** | Trazabilidad normativa en tres puntos (detector / normalizador / gate) — ver sección dedicada |
+| **ISO/IEC 27034-1:2011** | Trazabilidad en tres puntos: ANF en `scan_config.json`, `asc_id` en cada hallazgo, auditoría de ASC en este reporte |
+| **SSVC v2.1 (CISA/SEI-CERT)** | Árbol de decisión del tercer gate con EPSS y CISA KEV |
 | **OWASP Top 10 (2021)** | Categorización de todos los hallazgos normalizados |
 | **CVSS v3.1 (NIST)** | Puntuación de severidad para hallazgos de Trivy |
 | **CWE/SANS Top 25** | Clasificación de debilidades en SAST y DAST |
 | **MITRE ATT&CK** | Referencia para cadenas de ataque identificadas por la IA |
-| **SSVC v2.1 (CISA/SEI-CERT)** | Árbol de decisión del tercer gate, con EPSS y CISA KEV |
+| **EPSS (FIRST.org)** | Probabilidad de explotación en 30 días por CVE ID |
+| **CISA KEV** | Catálogo de CVEs con explotación activa confirmada |
 
-### Herramientas integradas en el pipeline
+### Herramientas y su ASC ISO/IEC 27034
 
 | Herramienta | Tipo | ASC ISO/IEC 27034 | Hallazgos únicos |
 |---|---|---|---|
-| Semgrep | SAST | ASC-SAST-001 | {tools.get('semgrep',0)} |
-| Trivy | SCA | ASC-SCA-001 | {tools.get('trivy',0)} |
-| OWASP ZAP | DAST | ASC-DAST-001 | {tools.get('zap',0)} |
-| Nuclei | Pentesting | ASC-PENTEST-001 | {tools.get('nuclei',0)} |
+| Semgrep OSS | SAST | `ASC-SAST-001` | {tools.get('semgrep',0)} |
+| Trivy | SCA | `ASC-SCA-001` | {tools.get('trivy',0)} |
+| OWASP ZAP | DAST | `ASC-DAST-001` | {tools.get('zap',0)} |
+| Nuclei v3 | Pentesting | `ASC-PENTEST-001` | {tools.get('nuclei',0)} |
 
 ### Contribución diferencial por tipo de gate
 
-| Capacidad | Gate Tradicional | Gate con IA | Gate SSVC+EPSS+KEV |
+| Capacidad | Tradicional | Gate IA | SSVC+EPSS+KEV |
 |---|---|---|---|
-| Detección de falsos positivos | ❌ | ✅ | ✅ |
-| Análisis de explotabilidad real | ❌ | ✅ | ✅ |
+| Falsos positivos | ❌ | ✅ | ✅ |
+| Explotabilidad real | ❌ | ✅ | ✅ |
 | Cadenas de ataque ({chains} en este run) | ❌ | ✅ | ❌ |
-| Blind spots de cobertura | ❌ | ✅ | ❌ |
-| Métricas formales (F1 vs. CISA KEV) | ❌ | ❌ | ✅ |
-| Trazabilidad normativa ISO/IEC 27034 | ❌ | ❌ | ✅ (vía asc_id, ver sección dedicada) |
+| Métricas formales F1 | ❌ | ❌ | ✅ |
+| Trazabilidad ISO/IEC 27034 | ❌ | ❌ | ✅ (vía `asc_id`) |
 | Impacto de negocio | ❌ | ✅ | ❌ |
+| Determinístico | ✅ | ❌ | ✅ |
 
-### Limitaciones del estudio
+### Limitaciones
 
-- Este reporte corresponde a una única corrida del pipeline sobre `{service}`; la
-  validación completa del mecanismo abarca nueve casos de estudio documentados en la
-  tesis (Capítulo 5), incluyendo dos casos adicionales de validación dirigida (seccion 5.6).
-- La evaluación IA requiere validación humana para decisiones en producción.
+- Este reporte corresponde a una única corrida sobre `{service}`. La validación completa
+  abarca nueve casos de estudio documentados en la tesis (Capítulo 5).
+- La evaluación IA requiere validación humana antes de decisiones en producción.
 - No reemplaza una auditoría de seguridad formal ni un pentest manual.
-- El gate SSVC prioriza deliberadamente la cautela ante hallazgos críticos con
-  evidencia mínima de explotabilidad (ver discusión en la tesis, seccion 5.6.3).
+- El gate SSVC prioriza la cautela ante hallazgos críticos — ver tesis sección 5.6.3.
 
 ---
 
 _Reporte generado el {timestamp} | Pipeline Run: `{pipeline_run}`_
 
 _**Autores:** Jhojan Stiven Castaño Jejen & Juan Manuel Arango Rodas_
-_**Universidad del Valle** – Ingeniería de Sistemas – 2026_
+_**Universidad del Valle** — Ingeniería de Sistemas — 2026_
 """
 
 
-# ── Orquestador principal ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  ORQUESTADOR PRINCIPAL
+# ══════════════════════════════════════════════════════════════════════════════
 
 def generate_report(findings_path, ai_eval_path, gate_path, output_path,
-                    recon_path=None):
+                    recon_path=None, scan_config_path=None):
 
-    print("\n" + "="*60)
-    print("  GENERADOR DE REPORTE – DevSecOps TG")
-    print("="*60)
+    print("\n" + "=" * 60)
+    print("  GENERADOR DE REPORTE — DevSecOps Engine v1.3")
+    print("=" * 60)
 
     with open(findings_path,  "r") as f: findings_data  = json.load(f)
     with open(ai_eval_path,   "r") as f: ai_eval_data   = json.load(f)
@@ -1072,19 +1090,32 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
         with open(recon_path, "r") as f:
             recon_data = json.load(f)
 
-    summary         = findings_data.get("summary", {})
-    findings        = findings_data.get("findings", [])
-    tools_executed  = findings_data.get("tools_executed", {})
-    evaluation      = ai_eval_data.get("evaluation", {})
-    gate_comparison = gate_data.get("gate_comparison", {})
-    attack_chains   = evaluation.get("attack_chains", [])
-    timestamp       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    pipeline_run    = findings_data.get("pipeline_run", "local")
-    service_name    = findings_data.get("service", "este servicio")
-    by_tool_dedup   = summary.get("by_tool", {})
+    # ── Construir trazabilidad ISO/IEC 27034 ──────────────────────────────────
+    # gate.py no escribe este bloque; lo calculamos aquí desde scan_config.json
+    # y findings.json, que sí contienen los datos necesarios (asc_id, iso27034_anf).
+    if not gate_data.get("iso27034_traceability"):
+        scan_cfg = {}
+        if scan_config_path and os.path.exists(scan_config_path):
+            with open(scan_config_path, "r") as f:
+                scan_cfg = json.load(f)
+        gate_data["iso27034_traceability"] = build_iso27034_traceability(
+            scan_cfg, findings_data.get("findings", [])
+        )
 
-    report  = ""
-    report += section_header(findings_data, ai_eval_data, gate_data)
+    # ── Variables compartidas ─────────────────────────────────────────────────
+    summary        = findings_data.get("summary", {})
+    findings       = findings_data.get("findings", [])
+    tools_executed = findings_data.get("tools_executed", {})
+    evaluation     = ai_eval_data.get("evaluation", {})
+    gate_comparison = gate_data.get("gate_comparison", {})
+    attack_chains  = evaluation.get("attack_chains", [])
+    timestamp      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pipeline_run   = findings_data.get("pipeline_run", "local")
+    service_name   = findings_data.get("service", "este servicio")
+    by_tool_dedup  = summary.get("by_tool", {})
+
+    # ── Composición del reporte ───────────────────────────────────────────────
+    report  = section_header(findings_data, ai_eval_data, gate_data)
     report += section_gate(gate_data, ai_eval_data)
     report += section_stats(summary, tools_executed)
     report += section_dedup_explanation(tools_executed, summary)
@@ -1106,33 +1137,44 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report)
 
-    total_findings = summary.get("total", 0)
-    print(f"  ✅ Reporte generado: {output_path}")
-    print(f"  📄 Tamaño         : {len(report):,} caracteres")
-    print(f"  🔗 Cadenas ataque : {len(attack_chains)}")
-    print(f"  🚦 Decisión       : {gate_data.get('decision','UNKNOWN')}")
-    ssvc_r = gate_data.get("gate_comparison",{}).get("ssvc",{})
-    ssvc_f1 = ssvc_r.get("f1_metrics",{}).get("f1_score","N/A")
-    print(f"  🔬 SSVC decision  : {ssvc_r.get('decision','N/A')} ({ssvc_r.get('aggregate_action','?')})")
-    print(f"  📊 SSVC F1        : {ssvc_f1}")
-    enrichment_used = ai_eval_data.get("ssvc_enrichment", {}).get("used", False)
-    print(f"  🔬 IA híbrida SSVC: {'Sí - enriquecida con EPSS/KEV' if enrichment_used else 'No (ssvc_gate no disponible)'}")
-    tra = gate_data.get("iso27034_traceability", {})
-    n_req = len([b for b in tra.get("asc_breakdown", []) if b.get("required")])
-    n_exec_req = len([b for b in tra.get("asc_breakdown", []) if b.get("required") and b.get("status") == "executed"])
-    print(f"  📋 ISO/IEC 27034  : trazabilidad normativa — {n_exec_req}/{n_req} ASC obligatorios ejecutados")
-    print(f"  📊 Hallazgos      : {total_findings} únicos de {sum(tools_executed.values())} raw")
-    print("="*60 + "\n")
+    tra       = gate_data.get("iso27034_traceability", {})
+    breakdown = tra.get("asc_breakdown", [])
+    n_req     = len([b for b in breakdown if b.get("required")])
+    n_exec    = len([b for b in breakdown if b.get("required") and b.get("status") == "executed"])
+
+    ssvc_r  = gate_data.get("gate_comparison", {}).get("ssvc", {})
+    f1_val  = ssvc_r.get("f1_metrics", {}).get("f1_score", "N/A")
+    enrich  = ai_eval_data.get("ssvc_enrichment", {})
+
+    print(f"  ✅ Reporte generado : {output_path}")
+    print(f"  📄 Tamaño          : {len(report):,} caracteres")
+    print(f"  🚦 Decisión final  : {gate_data.get('decision','UNKNOWN')}")
+    print(f"  🔬 SSVC decision   : {ssvc_r.get('decision','N/A')} ({ssvc_r.get('aggregate_action','?')})")
+    print(f"  📊 SSVC F1         : {f1_val}")
+    print(f"  🤖 IA híbrida      : {'✅ Activa (SSVC/EPSS/KEV)' if enrich.get('used') else '⚠️ Fallback estático'}")
+    print(f"  📋 ISO/IEC 27034   : {n_exec}/{n_req} ASC obligatorios ejecutados")
+    print(f"  🔗 Cadenas ataque  : {len(attack_chains)}")
+    print(f"  📊 Hallazgos       : {summary.get('total',0)} únicos de {sum(tools_executed.values())} raw")
+    print("=" * 60 + "\n")
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--findings",      required=True)
-    parser.add_argument("--ai-evaluation", required=True)
-    parser.add_argument("--gate-decision", required=True)
-    parser.add_argument("--output",        required=True)
+    parser = argparse.ArgumentParser(
+        description="Generador de reporte SECURITY_REPORT.md — DevSecOps Engine v1.3"
+    )
+    parser.add_argument("--findings",      required=True,
+                        help="Ruta a findings.json (normalizer.py)")
+    parser.add_argument("--ai-evaluation", required=True,
+                        help="Ruta a ai_evaluation.json (ai_engine.py)")
+    parser.add_argument("--gate-decision", required=True,
+                        help="Ruta a gate_decision.json (gate.py)")
+    parser.add_argument("--output",        required=True,
+                        help="Ruta de salida del reporte Markdown")
     parser.add_argument("--recon",         default=None,
-                        help="Ruta opcional a recon_context.json")
+                        help="Ruta opcional a recon_context.json (recon.py)")
+    parser.add_argument("--scan-config",   default=None,
+                        help="Ruta a scan_config.json (detector.py) — necesario para trazabilidad ISO/IEC 27034")
     args = parser.parse_args()
 
     generate_report(
@@ -1141,4 +1183,5 @@ if __name__ == "__main__":
         gate_path=args.gate_decision,
         output_path=args.output,
         recon_path=args.recon,
+        scan_config_path=args.scan_config,
     )

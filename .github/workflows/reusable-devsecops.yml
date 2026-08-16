@@ -1,945 +1,660 @@
-name: Reusable DevSecOps Pipeline v2
+# ─────────────────────────────────────────────────────────────────────────────
+# DevSecOps Engine v1.3 — Workflow Reutilizable
+# Trabajo de Grado — Universidad del Valle 2026
+# Jhojan Stiven Castaño Jejen & Juan Manuel Arango Rodas
+# ─────────────────────────────────────────────────────────────────────────────
+name: DevSecOps Engine — Pipeline Reutilizable
 
 on:
   workflow_call:
     inputs:
-      # ── Target ───────────────────────────────────────────────────────────
       target_image:
-        description: 'Imagen Docker del target (ej: bkimminich/juice-shop o ghcr.io/org/app:sha)'
-        required: false
+        description: "Imagen Docker completa (ghcr.io/org/app:sha o usuario/app:tag)"
         type: string
-        default: ''
+        required: false
+        default: ""
       target_url:
-        description: 'URL externa si la app ya está desplegada (sin Docker)'
-        required: false
+        description: "URL de la app desplegada (alternativa a target_image)"
         type: string
-        default: ''
+        required: false
+        default: ""
       target_port:
-        description: 'Puerto donde corre la app (ej: 3000)'
-        required: false
+        description: "Puerto expuesto por el contenedor"
         type: string
-        default: '8080'
-
-      # ── Metadata del servicio ─────────────────────────────────────────────
+        required: false
+        default: "8080"
       service_name:
-        description: 'Nombre del servicio para el reporte'
+        description: "Nombre del servicio — aparece en el reporte"
+        type: string
         required: true
-        type: string
       criticality:
-        description: 'Criticidad del negocio: high, medium, low'
-        required: false
+        description: "Nivel de criticidad: low | medium | high | critical"
         type: string
-        default: 'medium'
+        required: false
+        default: "medium"
       environment:
-        description: 'Entorno: staging, pre-prod'
-        required: false
+        description: "Entorno de ejecución: staging | pre-prod"
         type: string
-        default: 'staging'
-
-      # ── Build ─────────────────────────────────────────────────────────────
-      build_context:
-        description: 'Carpeta del Dockerfile si se construye local (opcional)'
         required: false
-        type: string
-        default: ''
-      use_ghcr:
-        description: 'true si la imagen está en GHCR privado y necesita login con GHCR_TOKEN'
-        required: false
-        type: boolean
-        default: false
-
-      # ── SAST: código fuente externo ───────────────────────────────────────
+        default: "staging"
       source_repo:
-        description: >
-          Repo cuyo código fuente se escaneará con Semgrep.
-          Formato: 'owner/repo' (ej: ManuelArango1229/Backend-FitFusion).
-          Si se omite, Semgrep escanea el código del engine.
-        required: false
+        description: "Repositorio cuyo código escanea Semgrep (org/repo)"
         type: string
-        default: ''
+        required: false
+        default: ""
       source_repo_ref:
-        description: 'Branch/tag/sha del source_repo a clonar (default: main)'
-        required: false
+        description: "Rama del repositorio fuente"
         type: string
-        default: 'main'
-
-      # ── Lenguaje (override del auto-detector) ─────────────────────────────
+        required: false
+        default: "main"
       language:
-        description: >
-          Forzar lenguaje para Semgrep: nodejs, python, java, go, dotnet, php.
-          Si se omite, se auto-detecta del código del engine o del source_repo.
-        required: false
+        description: "Override de lenguaje: auto | nodejs | python | java | php | golang"
         type: string
-        default: ''
-
+        required: false
+        default: "auto"
+      use_ghcr:
+        description: "true si la imagen está en GitHub Container Registry privado"
+        type: boolean
+        required: false
+        default: false
     secrets:
-      # ── IA ────────────────────────────────────────────────────────────────
       GROQ_API_KEY:
+        description: "API Key de Groq (LLaMA 3.3 70B — motor IA principal)"
+        required: true
+      GHCR_TOKEN:
+        description: "Token de acceso a GHCR (requerido si use_ghcr = true)"
         required: false
       OPENAI_API_KEY:
+        description: "API Key de OpenAI (fallback secundario del motor IA)"
         required: false
       ANTHROPIC_API_KEY:
+        description: "API Key de Anthropic Claude (fallback terciario del motor IA)"
         required: false
-
-      # ── Runtime secrets del target ────────────────────────────────────────
-      # Formato: "KEY1=valor1,KEY2=valor2,KEY3=valor3"
-      # El caller extrae sus propios secrets de GitHub y los concatena aquí.
-      # Ejemplo en el caller:
-      #   APP_SECRETS: "MONGO_URI=${{ secrets.MONGO_URI }},JWT_SECRET=${{ secrets.JWT_SECRET }}"
       APP_SECRETS:
+        description: "Variables de entorno de la app en formato KEY=VALUE separadas por espacio"
         required: false
 
-      # Token para hacer pull de imágenes privadas en GHCR
-      GHCR_TOKEN:
-        required: false
+# ─────────────────────────────────────────────────────────────────────────────
+# PERMISOS GLOBALES
+# ─────────────────────────────────────────────────────────────────────────────
+permissions:
+  contents:  read
+  packages:  read
+  actions:   read
+  security-events: write
 
+# ─────────────────────────────────────────────────────────────────────────────
+# JOBS
+# ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
-  # ── JOB 0: Auto-detector ─────────────────────────────────────────────────
-  detect:
-    name: Auto-detección de contexto
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 0: Auto-detector de contexto
+  # Genera scan_config.json con lenguaje, modo de escaneo y ASCs ISO/IEC 27034
+  # ───────────────────────────────────────────────────────────────────────────
+  detector:
+    name: "Job 0 — Auto-detector (ISO/IEC 27034 ANF)"
     runs-on: ubuntu-latest
     outputs:
-      language:      ${{ steps.detect.outputs.language }}
-      scan_mode:     ${{ steps.detect.outputs.scan_mode }}
-      dast_enabled:  ${{ steps.detect.outputs.dast_enabled }}
-      semgrep_rules: ${{ steps.detect.outputs.semgrep_rules }}
-    steps:
-      - name: Checkout ENGINE repo
-        uses: actions/checkout@v4
-        with:
-          repository: ManuelArango1229/devsecops-engine-
-          ref: main
+      language:    ${{ steps.detect.outputs.language }}
+      scan_mode:   ${{ steps.detect.outputs.scan_mode }}
+      has_openapi: ${{ steps.detect.outputs.has_openapi }}
 
-      # Si hay source_repo, clonarlo para que el detector detecte su lenguaje
-      - name: Checkout source repo (si aplica)
-        if: ${{ inputs.source_repo != '' }}
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@v4
+
+      - name: Checkout source repo (si se especificó)
+        if: inputs.source_repo != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.source_repo }}
-          ref: ${{ inputs.source_repo_ref }}
-          path: source_to_scan
-          token: ${{ secrets.GHCR_TOKEN || github.token }}
+          ref:        ${{ inputs.source_repo_ref }}
+          token:      ${{ secrets.GHCR_TOKEN || github.token }}
+          path:       source_repo
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Verificar estructura del engine
-        run: |
-          if [ ! -f scripts/detector.py ]; then
-            echo "❌ FATAL: scripts/detector.py no existe"
-            ls -la scripts/ 2>/dev/null || echo "scripts/ vacío"
-            exit 1
-          fi
-          echo "✅ scripts/detector.py encontrado"
+          python-version: "3.11"
 
       - name: Run detector
         id: detect
         run: |
-          mkdir -p reports
+          python scripts/detector.py \
+            --service-name    "${{ inputs.service_name }}" \
+            --criticality     "${{ inputs.criticality }}" \
+            --environment     "${{ inputs.environment }}" \
+            --target-image    "${{ inputs.target_image }}" \
+            --target-url      "${{ inputs.target_url }}" \
+            --target-port     "${{ inputs.target_port }}" \
+            --language        "${{ inputs.language }}" \
+            --source-repo     "${{ inputs.source_repo }}" \
+            --output          results/scan_config.json
 
-          # Analizar source_repo si existe, si no el engine
-          DETECT_PATH="."
-          if [ -n "${{ inputs.source_repo }}" ] && [ -d "source_to_scan" ]; then
-            DETECT_PATH="source_to_scan"
-            echo "🔍 Detectando lenguaje en: ${{ inputs.source_repo }}"
-          fi
+          echo "language=$(python -c "import json; print(json.load(open('results/scan_config.json'))['language'])")" >> $GITHUB_OUTPUT
+          echo "scan_mode=$(python -c "import json; print(json.load(open('results/scan_config.json'))['scan_mode'])")" >> $GITHUB_OUTPUT
+          echo "has_openapi=$(python -c "import json; cfg=json.load(open('results/scan_config.json')); print(str(bool(cfg.get('openapi_spec'))).lower())")" >> $GITHUB_OUTPUT
 
-          python3 scripts/detector.py \
-            --path "$DETECT_PATH" \
-            --output reports/scan_config.json \
-            --target-image "${{ inputs.target_image }}" \
-            --target-url   "${{ inputs.target_url }}" \
-            --service      "${{ inputs.service_name }}" \
-            --criticality  "${{ inputs.criticality }}" \
-            --environment  "${{ inputs.environment }}"
-
-          python3 -c "
-          import json, sys
-          d = json.load(open('reports/scan_config.json'))
-          needed = ['language', 'scan_mode', 'summary', 'tools', 'service']
-          missing = [k for k in needed if k not in d]
-          if missing:
-              print('❌ scan_config.json incompleto:', missing)
-              sys.exit(1)
-          print('✅ scan_config.json válido')
-          print('   service   :', d['service'])
-          print('   language  :', d['language']['primary'])
-          print('   scan_mode :', d['scan_mode']['mode'])
-          print('   dast      :', d['summary']['dast_enabled'])
-          "
-
-          LANG=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['language']['primary'])")
-          MODE=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(d['scan_mode']['mode'])")
-          DAST=$(python3 -c "import json; d=json.load(open('reports/scan_config.json')); print(str(d['summary']['dast_enabled']).lower())")
-
-          # Override de lenguaje si el caller lo especifica
-          if [ -n "${{ inputs.language }}" ]; then
-            LANG="${{ inputs.language }}"
-            echo "⚡ Lenguaje forzado por el caller: $LANG"
-          fi
-
-          # Resolver reglas Semgrep según el lenguaje final
-          RULES=$(python3 -c "
-          rulesets = {
-              'nodejs':  'p/nodejs',
-              'python':  'p/python',
-              'java':    'p/java',
-              'go':      'p/golang',
-              'dotnet':  'p/csharp',
-              'php':     'p/php',
-              'generic': 'p/python',
-          }
-          print(rulesets.get('$LANG', 'p/python'))
-          ")
-
-          echo "language=$LANG"        >> $GITHUB_OUTPUT
-          echo "scan_mode=$MODE"       >> $GITHUB_OUTPUT
-          echo "dast_enabled=$DAST"    >> $GITHUB_OUTPUT
-          echo "semgrep_rules=$RULES"  >> $GITHUB_OUTPUT
-          echo "✅ Lenguaje: $LANG | Modo: $MODE | DAST: $DAST | Reglas: $RULES"
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload scan_config
+        uses: actions/upload-artifact@v4
         with:
           name: scan-config
-          path: reports/scan_config.json
+          path: results/scan_config.json
 
-  # ── JOB 1: SAST ──────────────────────────────────────────────────────────
-  sast-semgrep:
-    name: SAST – Semgrep (${{ needs.detect.outputs.language }})
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1: SAST — Semgrep OSS (ASC-SAST-001)
+  # ───────────────────────────────────────────────────────────────────────────
+  sast:
+    name: "Job 1 — SAST (Semgrep OSS) [ASC-SAST-001]"
     runs-on: ubuntu-latest
-    needs: [detect]
-    steps:
-      - name: Checkout ENGINE repo
-        uses: actions/checkout@v4
-        with:
-          repository: ManuelArango1229/devsecops-engine-
-          ref: main
+    needs: detector
 
-      # Clonar el source_repo si el caller lo especificó
-      - name: Checkout source repo para SAST
-        if: ${{ inputs.source_repo != '' }}
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@v4
+
+      - name: Checkout source repo
+        if: inputs.source_repo != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.source_repo }}
-          ref: ${{ inputs.source_repo_ref }}
-          path: source_to_scan
-          token: ${{ secrets.GHCR_TOKEN || github.token }}
+          ref:        ${{ inputs.source_repo_ref }}
+          token:      ${{ secrets.GHCR_TOKEN || github.token }}
+          path:       source_repo
 
       - name: Install Semgrep
-        run: pip install semgrep
+        run: pip install semgrep --quiet
 
       - name: Run Semgrep
         run: |
-          mkdir -p reports
-          RULES="${{ needs.detect.outputs.semgrep_rules }}"
+          LANG="${{ needs.detector.outputs.language }}"
+          RULES="p/generic"
+          case "$LANG" in
+            nodejs|javascript) RULES="p/nodejs p/javascript" ;;
+            python)            RULES="p/python" ;;
+            java)              RULES="p/java" ;;
+            php)               RULES="p/php" ;;
+            golang)            RULES="p/golang" ;;
+            csharp)            RULES="p/csharp" ;;
+          esac
 
-          # Escanear el source_repo si existe, si no el engine
-          SCAN_PATH="."
-          if [ -n "${{ inputs.source_repo }}" ] && [ -d "source_to_scan" ]; then
-            SCAN_PATH="source_to_scan"
-            echo "🔍 Semgrep escaneando: ${{ inputs.source_repo }}"
-          else
-            echo "🔍 Semgrep escaneando: engine (source_repo no especificado)"
-          fi
+          TARGET="."
+          if [ -d "source_repo" ]; then TARGET="source_repo"; fi
 
-          echo "Usando reglas: $RULES | Path: $SCAN_PATH"
-
-          semgrep \
+          semgrep scan \
             --config $RULES \
             --json \
-            --output reports/semgrep_report.json \
-            --timeout 300 \
-            --no-error "$SCAN_PATH" || true
+            --output results/semgrep_results.json \
+            $TARGET || true
 
-          if [ ! -f reports/semgrep_report.json ] || [ ! -s reports/semgrep_report.json ]; then
-            echo '{"results":[],"errors":[],"version":"1.0"}' > reports/semgrep_report.json
-          fi
-
-          python3 -c "
-          import json
-          d = json.load(open('reports/semgrep_report.json'))
-          errs = d.get('errors', [])
-          for e in errs[:3]:
-              print('  ⚠️ Semgrep error:', e.get('message',''))
-          print(f'Semgrep done: {len(d.get(\"results\",[]))} findings, {len(errs)} errores')
-          "
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload SAST results
+        uses: actions/upload-artifact@v4
         with:
-          name: semgrep-report
-          path: reports/semgrep_report.json
+          name: sast-results
+          path: results/semgrep_results.json
 
-  # ── JOB 2: SCA ────────────────────────────────────────────────────────────
-  sca-trivy:
-    name: SCA – Trivy
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2: SCA — Trivy (ASC-SCA-001)
+  # ───────────────────────────────────────────────────────────────────────────
+  sca:
+    name: "Job 2 — SCA (Trivy) [ASC-SCA-001]"
     runs-on: ubuntu-latest
-    needs: [detect]
+    needs: detector
+
     steps:
+      - name: Checkout engine
+        uses: actions/checkout@v4
+
+      - name: Login a GHCR (si use_ghcr = true)
+        if: inputs.use_ghcr == true && inputs.target_image != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
+
       - name: Install Trivy
         run: |
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main \
-            | sudo tee -a /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.50.4
 
-      # Login a GHCR si hay token (para imágenes privadas)
-      - name: Login GHCR (imágenes privadas)
-        if: ${{ inputs.use_ghcr }}
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
-
-      - name: Pull imagen Docker
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+      - name: Run Trivy sobre imagen
+        if: inputs.target_image != ''
         run: |
-          docker rm -f target-trivy 2>/dev/null || true
-          if [ -n "${{ inputs.build_context }}" ]; then
-            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
-          else
-            docker pull ${{ inputs.target_image }}
-          fi
-          echo "✅ Imagen lista: ${{ inputs.target_image }}"
-
-      - name: Run Trivy – imagen Docker
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
-        run: |
-          mkdir -p reports
           trivy image \
             --format json \
-            --output reports/trivy_report.json \
-            --severity CRITICAL,HIGH,MEDIUM \
-            --scanners vuln,secret,misconfig \
-            --no-progress \
-            ${{ inputs.target_image }} || true
+            --output results/trivy_results.json \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            "${{ inputs.target_image }}" || true
 
-          COUNT=$(python3 -c "
-          import json
-          d = json.load(open('reports/trivy_report.json'))
-          t = sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results', []))
-          print(t)
-          " 2>/dev/null || echo 0)
-          echo "Trivy image done: $COUNT vulnerabilidades"
-
-      - name: Run Trivy – filesystem
-        if: ${{ inputs.target_image == '' || inputs.target_url != '' }}
+      - name: Run Trivy sobre filesystem (si no hay imagen)
+        if: inputs.target_image == ''
         run: |
-          mkdir -p reports
+          TARGET="."
+          if [ -d "source_repo" ]; then TARGET="source_repo"; fi
           trivy fs \
             --format json \
-            --output reports/trivy_report.json \
-            --severity CRITICAL,HIGH,MEDIUM \
-            --scanners vuln,secret,misconfig \
-            --no-progress \
-            . || true
-          echo "Trivy filesystem done"
+            --output results/trivy_results.json \
+            $TARGET || true
 
-      - name: Garantizar reporte Trivy válido
-        run: |
-          if [ ! -f reports/trivy_report.json ] || [ ! -s reports/trivy_report.json ]; then
-            echo '{"Results":[]}' > reports/trivy_report.json
-          fi
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload SCA results
+        uses: actions/upload-artifact@v4
         with:
-          name: trivy-report
-          path: reports/trivy_report.json
+          name: sca-results
+          path: results/trivy_results.json
 
-  # ── JOB 3: Reconocimiento activo ─────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3: Reconocimiento de superficie de ataque
+  # ───────────────────────────────────────────────────────────────────────────
   recon:
-    name: Reconocimiento Activo
+    name: "Job 3 — Reconocimiento activo"
     runs-on: ubuntu-latest
-    needs: [detect]
-    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
+    needs: detector
+    outputs:
+      app_url:    ${{ steps.recon.outputs.app_url }}
+      app_alive:  ${{ steps.recon.outputs.app_alive }}
+
     steps:
-      - name: Checkout ENGINE repo
+      - name: Checkout engine
         uses: actions/checkout@v4
-        with:
-          repository: ManuelArango1229/devsecops-engine-
-          ref: main
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      # Login a GHCR si hay token
-      - name: Login GHCR (imágenes privadas)
-        if: ${{ inputs.use_ghcr }}
+      - name: Login a GHCR (si use_ghcr = true)
+        if: inputs.use_ghcr == true && inputs.target_image != ''
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
 
-      - name: Pull imagen Docker
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+      - name: Arrancar contenedor (si hay imagen)
+        if: inputs.target_image != ''
         run: |
-          docker rm -f target-app 2>/dev/null || true
-          if [ -n "${{ inputs.build_context }}" ]; then
-            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
-          else
-            docker pull ${{ inputs.target_image }}
-          fi
-
-      - name: Start target app
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
-        env:
-          APP_SECRETS: ${{ secrets.APP_SECRETS }}
-        run: |
-          docker rm -f target-app 2>/dev/null || true
-
-          # Construir flags -e para cada variable de APP_SECRETS
-          # Formato esperado: "KEY1=val1,KEY2=val2,KEY3=val3"
-          ENV_FLAGS=""
-          if [ -n "$APP_SECRETS" ]; then
-            IFS=',' read -ra VARS <<< "$APP_SECRETS"
-            for VAR in "${VARS[@]}"; do
-              VAR_TRIMMED=$(echo "$VAR" | xargs)
-              if [ -n "$VAR_TRIMMED" ]; then
-                ENV_FLAGS="$ENV_FLAGS -e $VAR_TRIMMED"
-              fi
+          ENV_ARGS=""
+          if [ -n "${{ secrets.APP_SECRETS }}" ]; then
+            for pair in ${{ secrets.APP_SECRETS }}; do
+              ENV_ARGS="$ENV_ARGS -e $pair"
             done
-            echo "🔑 Inyectando $(echo $APP_SECRETS | tr ',' '\n' | wc -l) variables de entorno"
+          fi
+          docker run -d --name target_app \
+            $ENV_ARGS \
+            -p "${{ inputs.target_port }}:${{ inputs.target_port }}" \
+            "${{ inputs.target_image }}"
+          sleep 15
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install recon dependencies
+        run: pip install requests httpx --quiet
+
+      - name: Run recon
+        id: recon
+        run: |
+          APP_URL="${{ inputs.target_url }}"
+          if [ -z "$APP_URL" ] && [ -n "${{ inputs.target_image }}" ]; then
+            APP_URL="http://localhost:${{ inputs.target_port }}"
           fi
 
-          docker run -d --name target-app \
-            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
-            $ENV_FLAGS \
-            ${{ inputs.target_image }}
+          python scripts/recon.py \
+            --target-url  "$APP_URL" \
+            --target-port "${{ inputs.target_port }}" \
+            --output      results/recon_context.json || true
 
-          echo "Esperando app en localhost:${{ inputs.target_port }}..."
-          for i in $(seq 1 40); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 3 --connect-timeout 3 \
-              http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
-            echo "Intento $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ] || [ "$STATUS" = "404" ]; then
-              echo "✅ App lista (HTTP $STATUS)"; break
-            fi
-            if [ "$i" = "40" ]; then
-              echo "⚠️ App no respondió tras 200s — continuando de todas formas"
-              docker logs target-app --tail 30 || true
-            fi
-            sleep 5
-          done
-
-      - name: Set target URL
-        id: target
-        run: |
-          if [ -n "${{ inputs.target_url }}" ]; then
-            echo "url=${{ inputs.target_url }}" >> $GITHUB_OUTPUT
+          # Health check
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL" 2>/dev/null || echo "000")
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+            echo "app_alive=true"  >> $GITHUB_OUTPUT
           else
-            echo "url=http://localhost:${{ inputs.target_port }}" >> $GITHUB_OUTPUT
+            echo "app_alive=false" >> $GITHUB_OUTPUT
           fi
+          echo "app_url=$APP_URL" >> $GITHUB_OUTPUT
 
-      - name: Install recon tools
-        run: |
-          sudo apt-get install -y nmap curl wget unzip 2>/dev/null || true
-          pip install wafw00f --break-system-packages 2>/dev/null || true
-
-          FFUF_VERSION="2.1.0"
-          wget -q "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" \
-            -O /tmp/ffuf.tar.gz && \
-            tar -xzf /tmp/ffuf.tar.gz -C /tmp/ && \
-            sudo mv /tmp/ffuf /usr/local/bin/ffuf && \
-            chmod +x /usr/local/bin/ffuf && \
-            echo "✅ ffuf instalado" || echo "⚠️ ffuf no disponible"
-
-          HTTPX_VERSION="1.6.9"
-          wget -q "https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VERSION}/httpx_${HTTPX_VERSION}_linux_amd64.zip" \
-            -O /tmp/httpx.zip && \
-            unzip -q /tmp/httpx.zip -d /tmp/httpx_bin && \
-            sudo mv /tmp/httpx_bin/httpx /usr/local/bin/httpx && \
-            chmod +x /usr/local/bin/httpx && \
-            echo "✅ httpx instalado" || echo "⚠️ httpx no disponible"
-
-      - name: Run reconocimiento
-        run: |
-          mkdir -p reports
-          python3 scripts/recon.py \
-            --target "${{ steps.target.outputs.url }}" \
-            --output reports/recon_context.json
-
-      - name: Validar recon_context
-        run: |
-          TARGET="${{ steps.target.outputs.url }}"
-          python3 -c "
-          import json
-          try:
-              d = json.load(open('reports/recon_context.json'))
-              if not d.get('nuclei_targets'):
-                  d['nuclei_targets'] = ['$TARGET']
-              assert d.get('schema_version')
-              with open('reports/recon_context.json', 'w') as f:
-                  json.dump(d, f, indent=2)
-              print(f'✅ recon_context válido: {len(d[\"nuclei_targets\"])} targets')
-          except Exception as e:
-              print(f'⚠️ Regenerando recon_context: {e}')
-              fallback = {
-                  'schema_version': '1.0',
-                  'target_url': '$TARGET',
-                  'nuclei_targets': ['$TARGET'],
-                  'summary': {
-                      'open_ports': [${{ inputs.target_port }}],
-                      'discovered_routes_count': 0,
-                      'technologies': [],
-                      'waf_present': False,
-                      'missing_security_headers': [],
-                      'attack_surface_findings': 0,
-                  }
-              }
-              with open('reports/recon_context.json', 'w') as f:
-                  json.dump(fallback, f, indent=2)
-          "
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload recon results
+        uses: actions/upload-artifact@v4
         with:
-          name: recon-context
-          path: reports/recon_context.json
+          name: recon-results
+          path: results/recon_context.json
 
-  # ── JOB 4: DAST – ZAP ────────────────────────────────────────────────────
-  dast-zap:
-    name: DAST – OWASP ZAP
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 4: DAST — OWASP ZAP (ASC-DAST-001)
+  # ───────────────────────────────────────────────────────────────────────────
+  dast:
+    name: "Job 4 — DAST (OWASP ZAP) [ASC-DAST-001]"
     runs-on: ubuntu-latest
-    needs: [detect, recon]
-    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
-    steps:
-      - name: Checkout ENGINE repo
-        uses: actions/checkout@v4
-        with:
-          repository: ManuelArango1229/devsecops-engine-
-          ref: main
+    needs: [detector, recon]
+    if: needs.recon.outputs.app_alive == 'true'
 
-      - name: Login GHCR (imágenes privadas)
-        if: ${{ inputs.use_ghcr }}
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@v4
+
+      - name: Login a GHCR (si use_ghcr = true)
+        if: inputs.use_ghcr == true && inputs.target_image != ''
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
 
-      - name: Pull imagen Docker
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+      - name: Arrancar contenedor
+        if: inputs.target_image != ''
         run: |
-          docker rm -f target-app 2>/dev/null || true
-          if [ -n "${{ inputs.build_context }}" ]; then
-            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
-          else
-            docker pull ${{ inputs.target_image }}
-          fi
-
-      - name: Start target app
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
-        env:
-          APP_SECRETS: ${{ secrets.APP_SECRETS }}
-        run: |
-          docker rm -f target-app 2>/dev/null || true
-
-          ENV_FLAGS=""
-          if [ -n "$APP_SECRETS" ]; then
-            IFS=',' read -ra VARS <<< "$APP_SECRETS"
-            for VAR in "${VARS[@]}"; do
-              VAR_TRIMMED=$(echo "$VAR" | xargs)
-              [ -n "$VAR_TRIMMED" ] && ENV_FLAGS="$ENV_FLAGS -e $VAR_TRIMMED"
+          ENV_ARGS=""
+          if [ -n "${{ secrets.APP_SECRETS }}" ]; then
+            for pair in ${{ secrets.APP_SECRETS }}; do
+              ENV_ARGS="$ENV_ARGS -e $pair"
             done
-            echo "🔑 Inyectando variables de entorno para ZAP"
           fi
+          docker run -d --name target_app \
+            $ENV_ARGS \
+            -p "${{ inputs.target_port }}:${{ inputs.target_port }}" \
+            "${{ inputs.target_image }}"
+          sleep 15
 
-          docker run -d --name target-app \
-            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
-            $ENV_FLAGS \
-            ${{ inputs.target_image }}
-
-          echo "Esperando app en localhost:${{ inputs.target_port }}..."
-          for i in $(seq 1 40); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 3 --connect-timeout 3 \
-              http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
-            echo "Intento $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ] || [ "$STATUS" = "404" ]; then
-              echo "✅ App lista (HTTP $STATUS)"; break
-            fi
-            if [ "$i" = "40" ]; then
-              echo "⚠️ App no respondió — continuando de todas formas"
-              docker logs target-app --tail 30 || true
-            fi
-            sleep 5
-          done
-
-      - name: Download recon context
-        uses: actions/download-artifact@v4
-        with:
-          name: recon-context
-          path: reports/
-
-      - name: Run ZAP Baseline
+      - name: Run ZAP Baseline Scan
         run: |
-          mkdir -p reports
-          chmod -R 777 reports
-
-          if [ -n "${{ inputs.target_url }}" ]; then
-            TARGET_URL="${{ inputs.target_url }}"
-          else
-            TARGET_URL="http://localhost:${{ inputs.target_port }}"
-          fi
-          echo "ZAP target: $TARGET_URL"
-
+          APP_URL="${{ needs.recon.outputs.app_url }}"
           docker run --rm \
             --network host \
-            -v $(pwd)/reports:/zap/wrk:rw \
-            -u root \
+            -v $(pwd)/results:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
-            -t "$TARGET_URL" \
-            -J /zap/wrk/zap_report.json \
-            -r /zap/wrk/zap_report.html \
-            -l WARN -I || true
+            -t "$APP_URL" \
+            -J zap_results.json \
+            -I || true
 
-          if [ ! -f reports/zap_report.json ] || [ ! -s reports/zap_report.json ]; then
-            echo '{"site":[{"alerts":[]}],"@version":"2.14.0"}' > reports/zap_report.json
-          fi
-
-          COUNT=$(python3 -c "
-          import json
-          d = json.load(open('reports/zap_report.json'))
-          print(sum(len(s.get('alerts',[])) for s in d.get('site',[])))
-          " 2>/dev/null || echo 0)
-          echo "ZAP done: $COUNT alertas"
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload DAST results
+        uses: actions/upload-artifact@v4
         with:
-          name: zap-report
-          path: reports/zap_report.json
+          name: dast-results
+          path: results/zap_results.json
 
-  # ── JOB 5: Pentesting – Nuclei ────────────────────────────────────────────
-  pentest-nuclei:
-    name: Pentesting – Nuclei (v3.3.8)
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 5: Pentesting — Nuclei (ASC-PENTEST-001)
+  # ───────────────────────────────────────────────────────────────────────────
+  pentest:
+    name: "Job 5 — Pentesting (Nuclei v3) [ASC-PENTEST-001]"
     runs-on: ubuntu-latest
-    needs: [detect, recon]
-    if: ${{ needs.detect.outputs.dast_enabled == 'true' }}
-    steps:
-      - name: Checkout ENGINE repo
-        uses: actions/checkout@v4
-        with:
-          repository: ManuelArango1229/devsecops-engine-
-          ref: main
+    needs: [detector, recon]
+    if: needs.recon.outputs.app_alive == 'true'
 
-      - name: Login GHCR (imágenes privadas)
-        if: ${{ inputs.use_ghcr }}
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@v4
+
+      - name: Login a GHCR (si use_ghcr = true)
+        if: inputs.use_ghcr == true && inputs.target_image != ''
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
 
-      - name: Pull imagen Docker
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
+      - name: Arrancar contenedor
+        if: inputs.target_image != ''
         run: |
-          docker rm -f target-app 2>/dev/null || true
-          if [ -n "${{ inputs.build_context }}" ]; then
-            docker build -t ${{ inputs.target_image }} ${{ inputs.build_context }}
-          else
-            docker pull ${{ inputs.target_image }}
-          fi
-
-      - name: Start target app
-        if: ${{ inputs.target_image != '' && inputs.target_url == '' }}
-        env:
-          APP_SECRETS: ${{ secrets.APP_SECRETS }}
-        run: |
-          docker rm -f target-app 2>/dev/null || true
-
-          ENV_FLAGS=""
-          if [ -n "$APP_SECRETS" ]; then
-            IFS=',' read -ra VARS <<< "$APP_SECRETS"
-            for VAR in "${VARS[@]}"; do
-              VAR_TRIMMED=$(echo "$VAR" | xargs)
-              [ -n "$VAR_TRIMMED" ] && ENV_FLAGS="$ENV_FLAGS -e $VAR_TRIMMED"
+          ENV_ARGS=""
+          if [ -n "${{ secrets.APP_SECRETS }}" ]; then
+            for pair in ${{ secrets.APP_SECRETS }}; do
+              ENV_ARGS="$ENV_ARGS -e $pair"
             done
-            echo "🔑 Inyectando variables de entorno para Nuclei"
           fi
+          docker run -d --name target_app \
+            $ENV_ARGS \
+            -p "${{ inputs.target_port }}:${{ inputs.target_port }}" \
+            "${{ inputs.target_image }}"
+          sleep 15
 
-          docker run -d --name target-app \
-            -p ${{ inputs.target_port }}:${{ inputs.target_port }} \
-            $ENV_FLAGS \
-            ${{ inputs.target_image }}
-
-          echo "Esperando app en localhost:${{ inputs.target_port }}..."
-          for i in $(seq 1 40); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 3 --connect-timeout 3 \
-              http://localhost:${{ inputs.target_port }} 2>/dev/null || echo "000")
-            echo "Intento $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "304" ]; then
-              echo "✅ App lista (HTTP $STATUS)"; break
-            fi
-            if [ "$i" = "40" ]; then
-              echo "⚠️ App no respondió — continuando de todas formas"
-              docker logs target-app --tail 30 || true
-            fi
-            sleep 5
-          done
-
-      - name: Download recon context
-        uses: actions/download-artifact@v4
-        with:
-          name: recon-context
-          path: reports/
-
-      - name: Install Nuclei v3.3.8
+      - name: Install Nuclei
         run: |
-          wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.3.8/nuclei_3.3.8_linux_amd64.zip \
-            -O /tmp/nuclei.zip
-          unzip -q /tmp/nuclei.zip -d /tmp/nuclei_bin
-          sudo mv /tmp/nuclei_bin/nuclei /usr/local/bin/nuclei
-          chmod +x /usr/local/bin/nuclei
-          nuclei -version
+          wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.3.8/nuclei_3.3.8_linux_amd64.zip
+          unzip -q nuclei_3.3.8_linux_amd64.zip
+          chmod +x nuclei
+          sudo mv nuclei /usr/local/bin/nuclei
 
-      - name: Update Nuclei templates
-        run: nuclei -update-templates -silent || true
-
-      - name: Set target URL
-        id: target
+      - name: Run Nuclei
         run: |
-          if [ -n "${{ inputs.target_url }}" ]; then
-            echo "url=${{ inputs.target_url }}" >> $GITHUB_OUTPUT
-          else
-            echo "url=http://localhost:${{ inputs.target_port }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Run Nuclei con rutas del recon
-        run: |
-          mkdir -p reports
-          TARGET="${{ steps.target.outputs.url }}"
-
-          python3 -c "
-          import json
-          try:
-              d = json.load(open('reports/recon_context.json'))
-              targets = d.get('nuclei_targets', [])
-              if not targets:
-                  targets = ['$TARGET']
-              with open('/tmp/nuclei_targets.txt', 'w') as f:
-                  f.write('\n'.join(targets))
-              print(f'✅ {len(targets)} targets para Nuclei')
-          except Exception as e:
-              print(f'⚠️ Usando target base: {e}')
-              open('/tmp/nuclei_targets.txt','w').write('$TARGET')
-          "
-
+          APP_URL="${{ needs.recon.outputs.app_url }}"
           nuclei \
-            -list /tmp/nuclei_targets.txt \
-            -tags owasp,jwt,sqli,xss,exposure,misconfig,cve,token,auth,api,swagger \
-            -severity info,low,medium,high,critical \
-            -json-export reports/nuclei_report.json \
-            -timeout 30 \
-            -rate-limit 50 \
-            -silent || true
+            -u "$APP_URL" \
+            -severity critical,high,medium \
+            -json \
+            -o results/nuclei_results.json \
+            -timeout 10 || true
 
-          if [ ! -f reports/nuclei_report.json ] || [ ! -s reports/nuclei_report.json ]; then
-            echo '[]' > reports/nuclei_report.json
-          fi
-
-          COUNT=$(python3 -c "
-          import json
-          raw = open('reports/nuclei_report.json').read().strip()
-          if raw.startswith('['):
-              print(len(json.loads(raw)))
-          else:
-              print(len([l for l in raw.splitlines() if l.strip()]))
-          " 2>/dev/null || echo 0)
-          echo "Nuclei done: $COUNT findings"
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload pentest results
+        uses: actions/upload-artifact@v4
         with:
-          name: nuclei-report
-          path: reports/nuclei_report.json
+          name: pentest-results
+          path: results/nuclei_results.json
 
-  # ── JOB 6: Evaluación IA + Gate + Reporte ────────────────────────────────
-  ai-evaluation:
-    name: Evaluacion IA + Security Gate
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 6: Evaluación — Normalización + Gate IA Híbrido + SSVC + Reporte
+  # Este job siempre se ejecuta (if: always()) para garantizar el reporte
+  # aunque alguna herramienta falle parcialmente.
+  # ───────────────────────────────────────────────────────────────────────────
+  evaluation:
+    name: "Job 6 — Evaluación (Normalización + Gate IA + SSVC + ISO 27034)"
     runs-on: ubuntu-latest
-    needs: [detect, sast-semgrep, sca-trivy, dast-zap, pentest-nuclei, recon]
+    needs: [detector, sast, sca, recon, dast, pentest]
     if: always()
+
     steps:
-      - name: Checkout ENGINE repo
+      - name: Checkout engine
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          repository: ManuelArango1229/devsecops-engine-
-          ref: main
+          python-version: "3.11"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python deps
-        run: pip install openai anthropic requests python-dotenv
-
-      - name: Download semgrep-report
-        uses: actions/download-artifact@v4
-        with:
-          name: semgrep-report
-          path: reports/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Download trivy-report
-        uses: actions/download-artifact@v4
-        with:
-          name: trivy-report
-          path: reports/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Download zap-report
-        uses: actions/download-artifact@v4
-        with:
-          name: zap-report
-          path: reports/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Download nuclei-report
-        uses: actions/download-artifact@v4
-        with:
-          name: nuclei-report
-          path: reports/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Download recon-context
-        uses: actions/download-artifact@v4
-        with:
-          name: recon-context
-          path: reports/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Download scan-config
-        uses: actions/download-artifact@v4
-        with:
-          name: scan-config
-          path: reports/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Garantizar fallbacks y verificar hallazgos
+      - name: Install Python dependencies
         run: |
-          mkdir -p reports
-          [ -f reports/semgrep_report.json ] || echo '{"results":[],"errors":[],"version":"1.0"}' > reports/semgrep_report.json
-          [ -f reports/trivy_report.json   ] || echo '{"Results":[]}'                             > reports/trivy_report.json
-          [ -f reports/zap_report.json     ] || echo '{"site":[{"alerts":[]}]}'                   > reports/zap_report.json
-          [ -f reports/nuclei_report.json  ] || echo '[]'                                         > reports/nuclei_report.json
-          [ -f reports/recon_context.json  ] || echo '{"schema_version":"1.0","nuclei_targets":[],"summary":{}}' > reports/recon_context.json
-          [ -f reports/scan_config.json    ] || echo '{"schema_version":"1.0"}'                   > reports/scan_config.json
+          pip install requests openai anthropic groq --quiet
 
-          echo "📁 Archivos en reports/:"
-          ls -lah reports/
+      - name: Crear directorio de resultados
+        run: mkdir -p results
 
-          python3 -c "
-          import json
-          try:
-              d = json.load(open('reports/semgrep_report.json'))
-              print('  semgrep :', len(d.get('results', [])), 'findings')
-          except Exception as e: print('  semgrep : error -', e)
-          try:
-              d = json.load(open('reports/trivy_report.json'))
-              t = sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results', []))
-              print('  trivy   :', t, 'vulnerabilidades')
-          except Exception as e: print('  trivy   : error -', e)
-          try:
-              d = json.load(open('reports/zap_report.json'))
-              t = sum(len(s.get('alerts', [])) for s in d.get('site', []))
-              print('  zap     :', t, 'alertas')
-          except Exception as e: print('  zap     : error -', e)
-          try:
-              raw = open('reports/nuclei_report.json').read().strip()
-              t = len(json.loads(raw)) if raw.startswith('[') else len([l for l in raw.splitlines() if l.strip()])
-              print('  nuclei  :', t, 'findings')
-          except Exception as e: print('  nuclei  : error -', e)
-          "
+      # ── Descargar artefactos de jobs anteriores ─────────────────────────────
+      - name: Download scan_config
+        uses: actions/download-artifact@v4
+        with:
+          name:  scan-config
+          path:  results/
+          github-token: ${{ github.token }}
+        continue-on-error: true
 
-      - name: Normalize findings
-        env:
-          SERVICE_NAME:  ${{ inputs.service_name }}
-          ENVIRONMENT:   ${{ inputs.environment }}
-          CRITICALITY:   ${{ inputs.criticality }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
+      - name: Download SAST results
+        uses: actions/download-artifact@v4
+        with:
+          name:  sast-results
+          path:  results/
+          github-token: ${{ github.token }}
+        continue-on-error: true
+
+      - name: Download SCA results
+        uses: actions/download-artifact@v4
+        with:
+          name:  sca-results
+          path:  results/
+          github-token: ${{ github.token }}
+        continue-on-error: true
+
+      - name: Download recon results
+        uses: actions/download-artifact@v4
+        with:
+          name:  recon-results
+          path:  results/
+          github-token: ${{ github.token }}
+        continue-on-error: true
+
+      - name: Download DAST results
+        uses: actions/download-artifact@v4
+        with:
+          name:  dast-results
+          path:  results/
+          github-token: ${{ github.token }}
+        continue-on-error: true
+
+      - name: Download pentest results
+        uses: actions/download-artifact@v4
+        with:
+          name:  pentest-results
+          path:  results/
+          github-token: ${{ github.token }}
+        continue-on-error: true
+
+      # ── Crear archivos vacíos para herramientas que no ejecutaron ────────────
+      - name: Asegurar archivos de resultados
         run: |
-          python3 scripts/normalizer.py \
-            --semgrep reports/semgrep_report.json \
-            --trivy   reports/trivy_report.json \
-            --zap     reports/zap_report.json \
-            --nuclei  reports/nuclei_report.json \
-            --output  reports/findings.json
+          touch results/semgrep_results.json 2>/dev/null || true
+          touch results/trivy_results.json   2>/dev/null || true
+          touch results/zap_results.json     2>/dev/null || true
+          touch results/nuclei_results.json  2>/dev/null || true
+          touch results/recon_context.json   2>/dev/null || true
+          touch results/scan_config.json     2>/dev/null || true
+          # scan_config mínimo si el detector falló
+          python -c "
+          import json, os
+          cfg_path = 'results/scan_config.json'
+          if os.path.getsize(cfg_path) == 0:
+              json.dump({
+                  'service': '${{ inputs.service_name }}',
+                  'language': '${{ inputs.language }}',
+                  'business_criticality': '${{ inputs.criticality }}',
+                  'environment': '${{ inputs.environment }}',
+                  'scan_mode': 'image' if '${{ inputs.target_image }}' else 'url',
+                  'iso27034_anf': {
+                      'required_ascs': ['ASC-SAST-001','ASC-SCA-001','ASC-DAST-001','ASC-PENTEST-001'],
+                      'optional_ascs': []
+                  }
+              }, open(cfg_path,'w'), indent=2)
+          " || true
 
-          python3 -c "
-          import json
-          d = json.load(open('reports/findings.json'))
-          s = d.get('summary', {})
-          print('=== FINDINGS NORMALIZADOS ===')
-          print('  Total   :', s.get('total', 0))
-          print('  CRITICAL:', s.get('by_severity', {}).get('CRITICAL', 0))
-          print('  HIGH    :', s.get('by_severity', {}).get('HIGH', 0))
-          print('  MEDIUM  :', s.get('by_severity', {}).get('MEDIUM', 0))
-          print('  By tool :', d.get('tools_executed', {}))
-          "
+      # ── Paso 1: Normalización y deduplicación ──────────────────────────────
+      - name: Normalización de hallazgos
+        run: |
+          python scripts/normalizer.py \
+            --semgrep   results/semgrep_results.json \
+            --trivy     results/trivy_results.json \
+            --zap       results/zap_results.json \
+            --nuclei    results/nuclei_results.json \
+            --scan-config results/scan_config.json \
+            --service   "${{ inputs.service_name }}" \
+            --criticality "${{ inputs.criticality }}" \
+            --environment "${{ inputs.environment }}" \
+            --output    results/findings.json
 
-      - name: AI Evaluation
+      # ── Paso 2: Gate SSVC + EPSS + CISA KEV ───────────────────────────────
+      - name: Gate SSVC + EPSS + CISA KEV
+        run: |
+          python scripts/ssvc_gate.py \
+            --findings    results/findings.json \
+            --criticality "${{ inputs.criticality }}" \
+            --output      results/ssvc_result.json
+        continue-on-error: true
+
+      # ── Paso 3: Motor de evaluación IA híbrida ─────────────────────────────
+      - name: Evaluación IA híbrida (LLaMA 3.3 70B + fallback)
         env:
           GROQ_API_KEY:      ${{ secrets.GROQ_API_KEY }}
           OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SERVICE_NAME:      ${{ inputs.service_name }}
-          ENVIRONMENT:       ${{ inputs.environment }}
-          GITHUB_RUN_ID:     ${{ github.run_id }}
         run: |
-          python3 scripts/ai_engine.py \
-            --findings    reports/findings.json \
-            --output      reports/ai_evaluation.json \
-            --service      "${{ inputs.service_name }}" \
-            --criticality  "${{ inputs.criticality }}" \
-            --environment  "${{ inputs.environment }}"
+          python scripts/ai_engine.py \
+            --findings     results/findings.json \
+            --ssvc-result  results/ssvc_result.json \
+            --scan-config  results/scan_config.json \
+            --output       results/ai_evaluation.json
 
-      - name: Security Gate
+      # ── Paso 4: Security Gate (consolidación 3 enfoques) ──────────────────
+      - name: Security Gate (tradicional + IA + SSVC)
         run: |
-          python3 scripts/gate.py \
-            --findings      reports/findings.json \
-            --ai-evaluation reports/ai_evaluation.json \
-            --output        reports/gate_decision.json \
-            --criticality   "${{ inputs.criticality }}"
-
-      - name: Generate Report
-        run: |
-          python3 scripts/report_generator.py \
-            --findings      reports/findings.json \
-            --ai-evaluation reports/ai_evaluation.json \
-            --gate-decision reports/gate_decision.json \
-            --recon         reports/recon_context.json \
-            --output        reports/SECURITY_REPORT.md
-
-      - name: Upload final artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: devsecops-final-report
-          path: |
-            reports/scan_config.json
-            reports/recon_context.json
-            reports/findings.json
-            reports/ai_evaluation.json
-            reports/gate_decision.json
-            reports/SECURITY_REPORT.md
-          retention-days: 30
-
-      - name: Security Gate enforce
-        run: |
-          python3 scripts/gate.py \
-            --findings      reports/findings.json \
-            --ai-evaluation reports/ai_evaluation.json \
-            --output        reports/gate_decision.json \
+          python scripts/gate.py \
+            --findings      results/findings.json \
+            --ai-evaluation results/ai_evaluation.json \
+            --ssvc-result   results/ssvc_result.json \
             --criticality   "${{ inputs.criticality }}" \
-            --enforce
+            --output        results/gate_decision.json
+
+      # ── Paso 5: Generación del reporte con trazabilidad ISO/IEC 27034 ──────
+      - name: Generar reporte SECURITY_REPORT.md
+        run: |
+          python scripts/report_generator.py \
+            --findings      results/findings.json \
+            --ai-evaluation results/ai_evaluation.json \
+            --gate-decision results/gate_decision.json \
+            --recon         results/recon_context.json \
+            --scan-config   results/scan_config.json \
+            --output        results/SECURITY_REPORT.md
+
+      # ── Subir todos los artefactos finales ────────────────────────────────
+      - name: Upload resultados finales
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: devsecops-results-${{ inputs.service_name }}
+          path: |
+            results/scan_config.json
+            results/findings.json
+            results/ssvc_result.json
+            results/ai_evaluation.json
+            results/gate_decision.json
+            results/SECURITY_REPORT.md
+
+      # ── Mostrar decisión en el log del runner ─────────────────────────────
+      - name: Mostrar decisión de despliegue
+        if: always()
+        run: |
+          echo "=================================================="
+          echo "  DECISIÓN DEL SECURITY GATE"
+          echo "=================================================="
+          python -c "
+          import json
+          try:
+              gate = json.load(open('results/gate_decision.json'))
+              dec  = gate.get('decision','UNKNOWN')
+              src  = gate.get('decision_source','N/A')
+              icon = {'PASS':'✅','FAIL':'❌','CONDITIONAL':'⚠️'}.get(dec,'❓')
+              print(f'  {icon} Decisión:  {dec}')
+              print(f'  📋 Fuente:    {src}')
+              ssvc = gate.get('gate_comparison',{}).get('ssvc',{})
+              f1   = ssvc.get('f1_metrics',{}).get('f1_score','N/A')
+              agg  = ssvc.get('aggregate_action','N/A')
+              print(f'  🔬 SSVC:      {ssvc.get(\"decision\",\"N/A\")} ({agg})')
+              print(f'  📊 F1 Score:  {f1}')
+              tra  = gate.get('iso27034_traceability', {})
+              bd   = tra.get('asc_breakdown', [])
+              req  = [b for b in bd if b.get('required')]
+              exr  = [b for b in req if b.get('status')=='executed']
+              print(f'  📋 ISO 27034: {len(exr)}/{len(req)} ASC obligatorios ejecutados')
+          except Exception as e:
+              print(f'  ⚠️  No se pudo leer gate_decision.json: {e}')
+          " || true
+          echo "=================================================="
+
+      # ── Forzar fallo del job si la decisión es FAIL ───────────────────────
+      - name: Verificar decisión de despliegue
+        run: |
+          DECISION=$(python -c "
+          import json, sys
+          try:
+              d = json.load(open('results/gate_decision.json')).get('decision','UNKNOWN')
+              print(d)
+          except:
+              print('UNKNOWN')
+          " 2>/dev/null || echo "UNKNOWN")
+
+          echo "Decisión: $DECISION"
+
+          if [ "$DECISION" = "FAIL" ]; then
+            echo "❌ El Security Gate ha bloqueado el despliegue (FAIL)."
+            echo "   Revisa SECURITY_REPORT.md en los artefactos para los detalles."
+            exit 1
+          elif [ "$DECISION" = "CONDITIONAL" ]; then
+            echo "⚠️  Despliegue CONDITIONAL — revisar SECURITY_REPORT.md antes de promover a producción."
+          else
+            echo "✅ PASS — El despliegue puede proceder."
+          fi
