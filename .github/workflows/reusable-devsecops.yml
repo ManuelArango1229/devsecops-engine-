@@ -115,16 +115,31 @@ jobs:
       - name: Run detector
         id: detect
         run: |
+          # Determinar path a analizar
+          TARGET_PATH="."
+          if [ -d "source_repo" ]; then TARGET_PATH="source_repo"; fi
+
           python scripts/detector.py \
-            --service-name    "${{ inputs.service_name }}" \
-            --criticality     "${{ inputs.criticality }}" \
-            --environment     "${{ inputs.environment }}" \
-            --target-image    "${{ inputs.target_image }}" \
-            --target-url      "${{ inputs.target_url }}" \
-            --target-port     "${{ inputs.target_port }}" \
-            --language        "${{ inputs.language }}" \
-            --source-repo     "${{ inputs.source_repo }}" \
-            --output          results/scan_config.json
+            --service      "${{ inputs.service_name }}" \
+            --criticality  "${{ inputs.criticality }}" \
+            --environment  "${{ inputs.environment }}" \
+            --target-image "${{ inputs.target_image }}" \
+            --target-url   "${{ inputs.target_url }}" \
+            --path         "$TARGET_PATH" \
+            --output       results/scan_config.json
+
+          # Inyectar campos adicionales que el detector no escribe pero el pipeline necesita
+          python3 -c "
+          import json
+          cfg = json.load(open('results/scan_config.json'))
+          cfg.setdefault('language', '${{ inputs.language }}')
+          cfg.setdefault('scan_mode', 'image' if '${{ inputs.target_image }}' else ('url' if '${{ inputs.target_url }}' else 'filesystem'))
+          cfg.setdefault('iso27034_anf', {
+              'required_ascs': ['ASC-SAST-001','ASC-SCA-001','ASC-DAST-001','ASC-PENTEST-001'],
+              'optional_ascs': []
+          })
+          json.dump(cfg, open('results/scan_config.json','w'), indent=2)
+          " 
 
           echo "language=$(python -c "import json; print(json.load(open('results/scan_config.json'))['language'])")" >> $GITHUB_OUTPUT
           echo "scan_mode=$(python -c "import json; print(json.load(open('results/scan_config.json'))['scan_mode'])")" >> $GITHUB_OUTPUT
