@@ -148,7 +148,8 @@ jobs:
       - name: Asegurar scan_config.json válido
         if: always()
         run: |
-          if [ ! -s results/scan_config.json ]; then
+          mkdir -p results
+            mkdir -p results
             python3 -c "
             import json
             json.dump({
@@ -163,7 +164,6 @@ jobs:
                 }
             }, open('results/scan_config.json','w'), indent=2)
             "
-          fi
 
       - name: Upload scan_config
         uses: actions/upload-artifact@v4
@@ -223,9 +223,8 @@ jobs:
       - name: Asegurar semgrep_results.json válido
         if: always()
         run: |
-          if [ ! -s results/semgrep_results.json ]; then
+          mkdir -p results
             echo '{"results":[],"errors":[]}' > results/semgrep_results.json
-          fi
 
       - name: Upload SAST results
         uses: actions/upload-artifact@v4
@@ -285,9 +284,8 @@ jobs:
       - name: Asegurar trivy_results.json válido
         if: always()
         run: |
-          if [ ! -s results/trivy_results.json ]; then
+          mkdir -p results
             echo '{"Results":[]}' > results/trivy_results.json
-          fi
 
       - name: Upload SCA results
         uses: actions/upload-artifact@v4
@@ -368,9 +366,8 @@ jobs:
       - name: Asegurar recon_context.json válido
         if: always()
         run: |
-          if [ ! -s results/recon_context.json ]; then
+          mkdir -p results
             echo '{"target_url":"","host":"","port":"","summary":{}}' > results/recon_context.json
-          fi
 
       - name: Upload recon results
         uses: actions/upload-artifact@v4
@@ -432,9 +429,8 @@ jobs:
       - name: Asegurar zap_results.json válido
         if: always()
         run: |
-          if [ ! -s results/zap_results.json ]; then
+          mkdir -p results
             echo '{"site":[]}' > results/zap_results.json
-          fi
 
       - name: Upload DAST results
         uses: actions/upload-artifact@v4
@@ -505,9 +501,8 @@ jobs:
       - name: Asegurar nuclei_results.json válido
         if: always()
         run: |
-          if [ ! -s results/nuclei_results.json ]; then
+          mkdir -p results
             echo '[]' > results/nuclei_results.json
-          fi
 
       - name: Upload pentest results
         uses: actions/upload-artifact@v4
@@ -592,12 +587,14 @@ jobs:
       # ── Crear archivos vacíos para herramientas que no ejecutaron ────────────
       - name: Asegurar archivos de resultados
         run: |
-          touch results/semgrep_results.json 2>/dev/null || true
-          touch results/trivy_results.json   2>/dev/null || true
-          touch results/zap_results.json     2>/dev/null || true
-          touch results/nuclei_results.json  2>/dev/null || true
-          touch results/recon_context.json   2>/dev/null || true
-          touch results/scan_config.json     2>/dev/null || true
+          mkdir -p results
+          # Crear archivos con JSON vacío válido si no existen o están vacíos
+          [ -s results/semgrep_results.json ] || echo '{"results":[],"errors":[]}' > results/semgrep_results.json
+          [ -s results/trivy_results.json ]   || echo '{"Results":[]}'             > results/trivy_results.json
+          [ -s results/zap_results.json ]     || echo '{"site":[]}'                > results/zap_results.json
+          [ -s results/nuclei_results.json ]  || echo '[]'                         > results/nuclei_results.json
+          [ -s results/recon_context.json ]   || echo '{"target_url":"","summary":{}}' > results/recon_context.json
+          [ -s results/scan_config.json ]     || echo '{}' > results/scan_config.json
 
           # scan_config mínimo con ANF si el detector falló
           python3 -c "
