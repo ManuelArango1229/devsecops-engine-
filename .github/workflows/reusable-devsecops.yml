@@ -419,6 +419,7 @@ jobs:
         run: |
           APP_URL="${{ needs.recon.outputs.app_url }}"
           mkdir -p results zap_output
+          chmod 777 zap_output
           docker run --rm \
             --network host \
             -v $(pwd)/zap_output:/zap/wrk:rw \
@@ -495,18 +496,20 @@ jobs:
       - name: Run Nuclei
         run: |
           APP_URL="${{ needs.recon.outputs.app_url }}"
+          mkdir -p results
+          echo '[]' > results/nuclei_results.json
           nuclei \
             -u "$APP_URL" \
             -severity critical,high,medium \
-            -json \
+            -j \
             -o results/nuclei_results.json \
-            -timeout 10 || true
+            -timeout 10 2>/dev/null || true
 
       - name: Asegurar nuclei_results.json válido
         if: always()
         run: |
           mkdir -p results
-            echo '[]' > results/nuclei_results.json
+          [ -s results/nuclei_results.json ] || echo '[]' > results/nuclei_results.json
 
       - name: Upload pentest results
         uses: actions/upload-artifact@v4
