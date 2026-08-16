@@ -94,6 +94,9 @@ jobs:
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Checkout source repo (si se especificó)
         if: inputs.source_repo != ''
@@ -144,6 +147,9 @@ jobs:
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Checkout source repo
         if: inputs.source_repo != ''
@@ -196,6 +202,9 @@ jobs:
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Login a GHCR (si use_ghcr = true)
         if: inputs.use_ghcr == true && inputs.target_image != ''
@@ -248,6 +257,9 @@ jobs:
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Login a GHCR (si use_ghcr = true)
         if: inputs.use_ghcr == true && inputs.target_image != ''
@@ -319,6 +331,9 @@ jobs:
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Login a GHCR (si use_ghcr = true)
         if: inputs.use_ghcr == true && inputs.target_image != ''
@@ -373,6 +388,9 @@ jobs:
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Login a GHCR (si use_ghcr = true)
         if: inputs.use_ghcr == true && inputs.target_image != ''
@@ -435,6 +453,9 @@ jobs:
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
+        with:
+          repository: ManuelArango1229/devsecops-engine-
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
