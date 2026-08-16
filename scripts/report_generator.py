@@ -79,39 +79,82 @@ def bar(part, total, width=20):
 
 
 # ── Construcción del bloque ISO 27034 ─────────────────────────────────────────
-def build_iso27034_traceability(scan_config, findings_list):
+# Mapeo ASC → clave en tools_executed
+ASC_TO_TOOL_KEY = {
+    "ASC-SAST-001":    "semgrep",
+    "ASC-SCA-001":     "trivy",
+    "ASC-DAST-001":    "zap",
+    "ASC-PENTEST-001": "nuclei",
+}
+
+def build_iso27034_traceability(scan_config, findings_list, tools_executed=None):
     """
-    Construye el bloque de trazabilidad ISO/IEC 27034 directamente desde
-    scan_config.json y findings.json.
-    gate.py no escribe este bloque, así que lo calculamos aquí.
+    Construye el bloque de trazabilidad ISO/IEC 27034.
+    Un ASC se considera ejecutado si:
+      a) hay findings con ese asc_id, O
+      b) la herramienta correspondiente procesó resultados (tools_executed).
+    Esto evita que ASCs aparezcan como "no ejecutados" cuando corrieron
+    pero no produjeron hallazgos (resultado esperado en apps seguras).
     """
+    if tools_executed is None:
+        tools_executed = {}
+
     anf          = scan_config.get("iso27034_anf", {})
     required_ids = anf.get("required_ascs", [])
     optional_ids = anf.get("optional_ascs", [])
 
-    # Si el detector no generó el ANF, usamos los 4 ASCs canónicos como requeridos
+    # Siempre usar los 4 ASCs canónicos como base mínima
     if not required_ids:
         required_ids = list(ASC_CATALOG.keys())
 
     all_asc_ids  = required_ids + [a for a in optional_ids if a not in required_ids]
-    executed_set = {f.get("asc_id") for f in findings_list if f.get("asc_id")}
+
+    # ASCs con findings directos
+    executed_by_findings = {f.get("asc_id") for f in findings_list if f.get("asc_id")}
+
+    # ASCs cuya herramienta procesó resultados (aunque sean 0 findings)
+    executed_by_tool = {
+        asc for asc, tool_key in ASC_TO_TOOL_KEY.items()
+        if tool_key in tools_executed  # clave presente = herramienta procesada
+    }
+
+    executed_set = executed_by_findings | executed_by_tool
 
     breakdown = []
     for asc in all_asc_ids:
         tool_name, tool_desc = ASC_CATALOG.get(asc, ("Herramienta", "Control de seguridad"))
-        findings_for_asc = [f for f in findings_list if f.get("asc_id") == asc]
+        tool_key             = ASC_TO_TOOL_KEY.get(asc, "")
+        findings_for_asc     = [f for f in findings_list if f.get("asc_id") == asc]
+        raw_count            = tools_executed.get(tool_key, 0)
+        unique_count         = len(findings_for_asc)
+
         breakdown.append({
-            "asc_id":          asc,
-            "required":        asc in required_ids,
-            "status":          "executed" if asc in executed_set else "not_executed",
-            "tool":            tool_name,
-            "description":     tool_desc,
-            "findings_count":  len(findings_for_asc),
-            "severity_dist":   {
+            "asc_id":         asc,
+            "required":       asc in required_ids,
+            "status":         "executed" if asc in executed_set else "not_executed",
+            "tool":           tool_name,
+            "description":    tool_desc,
+            "findings_count": unique_count,
+            "raw_count":      raw_count,
+            "findings_note":  (
+                f"{unique_count} únicos de {raw_count} raw"
+                if raw_count > unique_count
+                else f"{unique_count} hallazgos"
+            ),
+            "severity_dist":  {
                 sev: sum(1 for f in findings_for_asc if f.get("severity") == sev)
                 for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
                 if any(f.get("severity") == sev for f in findings_for_asc)
             },
+            "compliance_note": (
+                "✅ Control ejecutado — " + (
+                    f"{unique_count} hallazgo(s) detectado(s)"
+                    if unique_count > 0
+                    else "sin hallazgos (resultado esperado en aplicaciones seguras)"
+                )
+                if asc in executed_set
+                else "⚠️ Control no ejecutado — verificar configuración del pipeline"
+            ),
         })
 
     return {
@@ -810,8 +853,8 @@ def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
 def section_iso27034(gate_data):
     """
     Sección de trazabilidad normativa ISO/IEC 27034.
-    Lee gate_data["iso27034_traceability"] construido en generate_report()
-    desde scan_config.json + findings.json.
+    Muestra qué controles ASC se ejecutaron, cuántos hallazgos produjeron
+    y si hay brechas de cobertura respecto al ANF del servicio.
     """
     tra = gate_data.get("iso27034_traceability", {})
     if not tra:
@@ -819,9 +862,8 @@ def section_iso27034(gate_data):
 
 ## 📋 Trazabilidad Normativa ISO/IEC 27034
 
-> ⚠️ No se encontró el bloque `iso27034_traceability` en esta corrida.
-> Verifica que `detector.py` haya generado el campo `iso27034_anf` en
-> `scan_config.json` y que se pase `--scan-config` al invocar este script.
+> ⚠️ No se encontró el bloque `iso27034_traceability`. Verifica que se pase
+> `--scan-config results/scan_config.json` al invocar `report_generator.py`.
 
 """
 
@@ -830,43 +872,57 @@ def section_iso27034(gate_data):
     language  = tra.get("language", "unknown")
     criticality = tra.get("criticality", "medium")
     scan_mode = tra.get("scan_mode", "unknown")
-    anf_defined = tra.get("anf_defined", False)
+    anf_def   = tra.get("anf_defined", False)
 
-    required = [b for b in breakdown if b.get("required")]
-    exec_req = [b for b in required if b.get("status") == "executed"]
+    required  = [b for b in breakdown if b.get("required")]
+    exec_req  = [b for b in required if b.get("status") == "executed"]
+    gap       = [b for b in required if b.get("status") != "executed"]
 
-    gap = [b for b in required if b.get("status") != "executed"]
-
+    # Tabla principal
     rows = ""
     for b in breakdown:
-        asc        = b.get("asc_id", "?")
-        tool       = b.get("tool", "—")
-        desc       = b.get("description", "—")
-        req_label  = "✅ Obligatorio" if b.get("required") else "⚪ Opcional"
-        status     = "✅ Ejecutado" if b.get("status") == "executed" else "⚠️ No ejecutado"
-        count      = b.get("findings_count", 0)
-        sev_dist   = b.get("severity_dist", {})
-        sev_str    = ", ".join(
-            f"{SEVERITY_ICONS.get(s,'')} {s}:{n}" for s, n in sev_dist.items()
-        ) if sev_dist else "—"
-        rows += f"| `{asc}` | {tool} | {desc} | {req_label} | {status} | {count} | {sev_str} |\n"
+        asc     = b.get("asc_id", "?")
+        tool    = b.get("tool", "—")
+        desc    = b.get("description", "—")
+        req_lbl = "✅ Obligatorio" if b.get("required") else "⚪ Opcional"
+        status  = b.get("status", "?")
+        note    = b.get("compliance_note", "")
+        count   = b.get("findings_note", f"{b.get('findings_count',0)} hallazgos")
+
+        sev_dist  = b.get("severity_dist", {})
+        sev_parts = []
+        for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+            n = sev_dist.get(sev, 0)
+            if n:
+                icon = {"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","LOW":"🟢","INFO":"⚪"}.get(sev,"")
+                sev_parts.append(f"{icon}{sev[0]}:{n}")
+        sev_str = " ".join(sev_parts) if sev_parts else "—"
+
+        rows += f"| `{asc}` | {tool} | {desc} | {req_lbl} | {note} | {count} | {sev_str} |\n"
 
     if not rows:
-        rows = "| — | — | — | — | Sin desglose disponible | — | — |\n"
+        rows = "| — | — | — | — | Sin datos | — | — |\n"
 
     if gap:
         gap_block = (
-            "### ⚠️ Brechas de cobertura detectadas\n\n"
-            "Los siguientes ASC son obligatorios según el ANF pero no ejecutaron "
-            "hallazgos en esta corrida:\n\n"
-            + "\n".join(f"- `{b.get('asc_id')}` — {b.get('tool','?')}: {b.get('description','')}" for b in gap)
+            "### ⚠️ Controles no ejecutados en esta corrida\n\n"
+            "Los siguientes controles son obligatorios según el ANF pero no "
+            "se ejecutaron o no produjeron resultados:\n\n"
+            + "\n".join(
+                f"- `{b.get('asc_id')}` — **{b.get('tool','?')}**: {b.get('description','')}  \n"
+                f"  Posible causa: herramienta no disponible, aplicación sin respuesta HTTP, "
+                f"o fallo en el job correspondiente."
+                for b in gap
+            )
             + "\n\n"
         )
     else:
         gap_block = (
-            "### ✅ Cobertura completa\n\n"
-            "Todos los ASC obligatorios según el ANF se ejecutaron en esta corrida "
-            "y registraron hallazgos.\n\n"
+            "### ✅ Cobertura completa del ANF\n\n"
+            f"Los {len(exec_req)} controles obligatorios definidos en el ANF para este servicio "
+            f"(`criticality={criticality}`, `language={language}`) se ejecutaron correctamente "
+            f"en esta corrida. Los controles sin hallazgos confirman la ausencia de vulnerabilidades "
+            f"de ese tipo en el contexto analizado — esto es un resultado positivo, no una omisión.\n\n"
         )
 
     return f"""---
@@ -875,17 +931,15 @@ def section_iso27034(gate_data):
 
 > ### ¿Cómo opera ISO/IEC 27034 en este pipeline?
 >
-> La norma **no actúa como gate de decisión** — ese rol lo cumple SSVC+EPSS+KEV.
-> ISO/IEC 27034-1:2011 se materializa en **tres puntos operativos concretos**:
+> ISO/IEC 27034-1:2011 establece que la seguridad debe trazarse a través de
+> **Application Security Controls (ASC)** vinculados al ciclo de vida de la aplicación.
+> El pipeline lo materializa en tres puntos operativos:
 >
-> | Punto | Componente | Qué hace |
+> | Punto | Componente | Acción |
 > |---|---|---|
-> | **1. ANF** | `detector.py` → `scan_config.json` | Define qué ASC son obligatorios según el lenguaje y la criticidad declarada del servicio |
-> | **2. asc_id** | `normalizer.py` → `findings.json` | Etiqueta cada hallazgo individual con el ASC que lo detectó |
-> | **3. Auditoría** | `report_generator.py` → este reporte | Registra qué ASC se ejecutaron frente a los requeridos por el ANF |
->
-> Esto permite responder: *¿el pipeline ejecutó todos los controles que la norma
-> requiere para este servicio?* y auditar brechas de cobertura por corrida.
+> | **1 — ANF** | `detector.py` → `scan_config.json` | Define qué ASC son obligatorios según lenguaje y criticidad |
+> | **2 — asc_id** | `normalizer.py` → `findings.json` | Etiqueta cada hallazgo con el ASC que lo detectó |
+> | **3 — Auditoría** | Este reporte | Compara ASC ejecutados vs. requeridos; detecta brechas |
 
 ### Contexto de esta corrida
 
@@ -894,26 +948,36 @@ def section_iso27034(gate_data):
 | **Lenguaje detectado** | `{language}` |
 | **Criticidad declarada** | `{criticality}` |
 | **Modo de escaneo** | `{scan_mode}` |
-| **ANF definido por detector** | {'✅ Sí' if anf_defined else '⚠️ No — se usaron ASC canónicos por defecto'} |
-| **ASC obligatorios requeridos** | {len(required)} |
-| **ASC obligatorios ejecutados** | {len(exec_req)} / {len(required)} |
+| **ANF generado por detector** | {'✅ Sí' if anf_def else '⚠️ No — se usaron ASC canónicos por defecto'} |
+| **Controles obligatorios requeridos** | {len(required)} |
+| **Controles obligatorios ejecutados** | **{len(exec_req)} / {len(required)}** |
 
-### ASC ejecutados frente a los requeridos por el ANF
+### Matriz de controles ASC ejecutados
 
-| ASC | Herramienta | Descripción | Obligatorio | Estado | Hallazgos | Distribución de severidad |
+| ASC | Herramienta | Control de seguridad | Obligatorio | Cumplimiento | Hallazgos únicos | Severidades |
 |---|---|---|---|---|---|---|
 {rows}
 
 {gap_block}
 
-**ASC ejecutados en esta corrida:** `{', '.join(sorted(executed)) if executed else 'ninguno registrado'}`
+### Interpretación de resultados sin hallazgos
 
-> **Nota sobre TLOT/ALOT:** el modelo de puntuación TLOT/ALOT usado en versiones
-> anteriores del pipeline fue reemplazado por el gate SSVC+EPSS+KEV (sección anterior)
-> porque dependía de constantes numéricas (0.50/0.65/0.80/0.95) que no están prescritas
-> por ISO/IEC 27034-1:2011. La norma define los conceptos TLOT/ALOT en §7.3.4 pero no
-> asigna valores concretos. El reemplazo eliminó la saturación (ALOT=0.35 idéntico en
-> todos los casos) y habilitó las métricas F1 formales que el modelo anterior no permitía.
+Un control que se ejecuta y **no produce hallazgos** indica que la herramienta
+analizó el servicio y no encontró vulnerabilidades de ese tipo. Esto **no es una
+brecha de cobertura** — es el resultado esperado en una aplicación bien configurada.
+La diferencia respecto a un control "no ejecutado" es fundamental:
+
+| Situación | Interpretación | Estado ANF |
+|---|---|---|
+| Control ejecutado, 0 hallazgos | Sin vulnerabilidades detectadas ✅ | Cumplido |
+| Control ejecutado, N hallazgos | Vulnerabilidades detectadas — ver gate | Cumplido |
+| Control no ejecutado | No se pudo verificar — posible brecha | ⚠️ Pendiente |
+
+> **Nota sobre TLOT/ALOT:** el modelo de puntuación TLOT/ALOT de versiones anteriores
+> fue reemplazado por el gate SSVC+EPSS+KEV (sección anterior) porque dependía de
+> constantes numéricas (0.50/0.65/0.80/0.95) no prescritas por ISO/IEC 27034-1:2011.
+> ISO/IEC 27034 se mantiene como marco de trazabilidad — su valor está en vincular
+> cada hallazgo al control que lo detectó, no en producir una puntuación numérica.
 
 """
 
@@ -1113,7 +1177,9 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
             except (json.JSONDecodeError, ValueError):
                 scan_cfg = {}
         gate_data["iso27034_traceability"] = build_iso27034_traceability(
-            scan_cfg, findings_data.get("findings", [])
+            scan_cfg,
+            findings_data.get("findings", []),
+            findings_data.get("tools_executed", {})
         )
 
     # ── Variables compartidas ─────────────────────────────────────────────────
