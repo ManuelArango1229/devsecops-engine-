@@ -418,20 +418,29 @@ jobs:
       - name: Run ZAP Baseline Scan
         run: |
           APP_URL="${{ needs.recon.outputs.app_url }}"
+          mkdir -p results zap_output
           docker run --rm \
             --network host \
-            -v $(pwd)/results:/zap/wrk:rw \
+            -v $(pwd)/zap_output:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
             -t "$APP_URL" \
             -J zap_results.json \
             -I || true
+          if [ -f zap_output/zap_results.json ]; then
+            sudo cp zap_output/zap_results.json results/zap_results.json
+            sudo chown $USER:$USER results/zap_results.json
+          else
+            echo '{"site":[]}' > results/zap_results.json
+          fi
+
 
       - name: Asegurar zap_results.json válido
         if: always()
         run: |
           mkdir -p results
-            echo '{"site":[]}' > results/zap_results.json
+          [ -s results/zap_results.json ] || echo '{"site":[]}' > results/zap_results.json
+
 
       - name: Upload DAST results
         uses: actions/upload-artifact@v4
@@ -480,15 +489,9 @@ jobs:
 
       - name: Install Nuclei
         run: |
-          # Obtener la última versión estable de Nuclei
-          NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest             | grep '"tag_name"' | cut -d'"' -f4)
-          echo "Instalando Nuclei $NUCLEI_VERSION"
-          wget -q "https://github.com/projectdiscovery/nuclei/releases/download/${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION#v}_linux_amd64.zip"             -O nuclei.zip
-          unzip -o -q nuclei.zip nuclei
-          chmod +x nuclei
-          sudo mv nuclei /usr/local/bin/nuclei
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          sudo cp $(go env GOPATH)/bin/nuclei /usr/local/bin/nuclei
           nuclei -version
-
       - name: Run Nuclei
         run: |
           APP_URL="${{ needs.recon.outputs.app_url }}"
@@ -763,5 +766,5 @@ jobs:
           elif [ "$DECISION" = "CONDITIONAL" ]; then
             echo "⚠️  CONDITIONAL — revisar SECURITY_REPORT.md antes de promover a producción."
           else
-            echo "✅ PASS — El despliegue puede proceder"
+            echo "✅ PASS — El despliegue puede proceder."
           fi
