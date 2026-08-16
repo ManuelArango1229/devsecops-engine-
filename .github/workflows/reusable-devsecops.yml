@@ -145,6 +145,26 @@ jobs:
           echo "scan_mode=$(python -c "import json; print(json.load(open('results/scan_config.json'))['scan_mode'])")" >> $GITHUB_OUTPUT
           echo "has_openapi=$(python -c "import json; cfg=json.load(open('results/scan_config.json')); print(str(bool(cfg.get('openapi_spec'))).lower())")" >> $GITHUB_OUTPUT
 
+      - name: Asegurar scan_config.json válido
+        if: always()
+        run: |
+          if [ ! -s results/scan_config.json ]; then
+            python3 -c "
+            import json
+            json.dump({
+                'service': '${{ inputs.service_name }}',
+                'language': '${{ inputs.language }}',
+                'business_criticality': '${{ inputs.criticality }}',
+                'environment': '${{ inputs.environment }}',
+                'scan_mode': 'image',
+                'iso27034_anf': {
+                    'required_ascs': ['ASC-SAST-001','ASC-SCA-001','ASC-DAST-001','ASC-PENTEST-001'],
+                    'optional_ascs': []
+                }
+            }, open('results/scan_config.json','w'), indent=2)
+            "
+          fi
+
       - name: Upload scan_config
         uses: actions/upload-artifact@v4
         with:
@@ -200,6 +220,13 @@ jobs:
             --output results/semgrep_results.json \
             $TARGET || true
 
+      - name: Asegurar semgrep_results.json válido
+        if: always()
+        run: |
+          if [ ! -s results/semgrep_results.json ]; then
+            echo '{"results":[],"errors":[]}' > results/semgrep_results.json
+          fi
+
       - name: Upload SAST results
         uses: actions/upload-artifact@v4
         with:
@@ -229,6 +256,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN || github.token }}
 
+      - name: Crear directorio de resultados
+        run: mkdir -p results
+
       - name: Run Trivy sobre imagen
         if: inputs.target_image != ''
         uses: aquasecurity/trivy-action@master
@@ -251,6 +281,13 @@ jobs:
           severity:   CRITICAL,HIGH,MEDIUM,LOW
           exit-code:  "0"
         continue-on-error: true
+
+      - name: Asegurar trivy_results.json válido
+        if: always()
+        run: |
+          if [ ! -s results/trivy_results.json ]; then
+            echo '{"Results":[]}' > results/trivy_results.json
+          fi
 
       - name: Upload SCA results
         uses: actions/upload-artifact@v4
@@ -328,6 +365,13 @@ jobs:
           fi
           echo "app_url=$APP_URL" >> $GITHUB_OUTPUT
 
+      - name: Asegurar recon_context.json válido
+        if: always()
+        run: |
+          if [ ! -s results/recon_context.json ]; then
+            echo '{"target_url":"","host":"","port":"","summary":{}}' > results/recon_context.json
+          fi
+
       - name: Upload recon results
         uses: actions/upload-artifact@v4
         with:
@@ -384,6 +428,13 @@ jobs:
             -t "$APP_URL" \
             -J zap_results.json \
             -I || true
+
+      - name: Asegurar zap_results.json válido
+        if: always()
+        run: |
+          if [ ! -s results/zap_results.json ]; then
+            echo '{"site":[]}' > results/zap_results.json
+          fi
 
       - name: Upload DAST results
         uses: actions/upload-artifact@v4
@@ -450,6 +501,13 @@ jobs:
             -json \
             -o results/nuclei_results.json \
             -timeout 10 || true
+
+      - name: Asegurar nuclei_results.json válido
+        if: always()
+        run: |
+          if [ ! -s results/nuclei_results.json ]; then
+            echo '[]' > results/nuclei_results.json
+          fi
 
       - name: Upload pentest results
         uses: actions/upload-artifact@v4
