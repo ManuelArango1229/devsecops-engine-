@@ -229,28 +229,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN || github.token }}
 
-      - name: Install Trivy
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.50.4
-
       - name: Run Trivy sobre imagen
         if: inputs.target_image != ''
-        run: |
-          trivy image \
-            --format json \
-            --output results/trivy_results.json \
-            --severity CRITICAL,HIGH,MEDIUM,LOW \
-            "${{ inputs.target_image }}" || true
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:    ${{ inputs.target_image }}
+          format:       json
+          output:       results/trivy_results.json
+          severity:     CRITICAL,HIGH,MEDIUM,LOW
+          exit-code:    "0"
+        continue-on-error: true
 
       - name: Run Trivy sobre filesystem (si no hay imagen)
         if: inputs.target_image == ''
-        run: |
-          TARGET="."
-          if [ -d "source_repo" ]; then TARGET="source_repo"; fi
-          trivy fs \
-            --format json \
-            --output results/trivy_results.json \
-            $TARGET || true
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type:  fs
+          scan-ref:   ${{ inputs.source_repo != '' && 'source_repo' || '.' }}
+          format:     json
+          output:     results/trivy_results.json
+          severity:   CRITICAL,HIGH,MEDIUM,LOW
+          exit-code:  "0"
+        continue-on-error: true
 
       - name: Upload SCA results
         uses: actions/upload-artifact@v4
@@ -432,10 +432,14 @@ jobs:
 
       - name: Install Nuclei
         run: |
-          wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.3.8/nuclei_3.3.8_linux_amd64.zip
-          unzip -q nuclei_3.3.8_linux_amd64.zip
+          # Obtener la última versión estable de Nuclei
+          NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest             | grep '"tag_name"' | cut -d'"' -f4)
+          echo "Instalando Nuclei $NUCLEI_VERSION"
+          wget -q "https://github.com/projectdiscovery/nuclei/releases/download/${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION#v}_linux_amd64.zip"             -O nuclei.zip
+          unzip -o -q nuclei.zip nuclei
           chmod +x nuclei
           sudo mv nuclei /usr/local/bin/nuclei
+          nuclei -version
 
       - name: Run Nuclei
         run: |
@@ -564,15 +568,35 @@ jobs:
       - name: Normalización de hallazgos
         run: |
           python scripts/normalizer.py \
-            --semgrep     results/semgrep_results.json \
-            --trivy       results/trivy_results.json \
-            --zap         results/zap_results.json \
-            --nuclei      results/nuclei_results.json \
-            --scan-config results/scan_config.json \
-            --service     "${{ inputs.service_name }}" \
-            --criticality "${{ inputs.criticality }}" \
-            --environment "${{ inputs.environment }}" \
-            --output      results/findings.json
+            --semgrep results/semgrep_results.json \
+            --trivy   results/trivy_results.json \
+            --zap     results/zap_results.json \
+            --nuclei  results/nuclei_results.json \
+            --output  results/findings.json
+
+          # Inyectar metadatos de servicio y scan_config en findings.json
+          python3 -c "
+          import json, os
+          findings = json.load(open('results/findings.json'))
+          findings['service']              = '${{ inputs.service_name }}'
+          findings['environment']          = '${{ inputs.environment }}'
+          findings['business_criticality'] = '${{ inputs.criticality }}'
+          findings['pipeline_run']         = os.environ.get('GITHUB_RUN_ID', 'local')
+          # Propagar asc_id desde scan_config si el normalizer no lo hace
+          cfg_path = 'results/scan_config.json'
+          if os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0:
+              cfg = json.load(open(cfg_path))
+              tool_asc = {
+                  'semgrep': 'ASC-SAST-001',
+                  'trivy':   'ASC-SCA-001',
+                  'zap':     'ASC-DAST-001',
+                  'nuclei':  'ASC-PENTEST-001',
+              }
+              for f in findings.get('findings', []):
+                  if not f.get('asc_id'):
+                      f['asc_id'] = tool_asc.get(f.get('tool',''), '')
+          json.dump(findings, open('results/findings.json','w'), indent=2)
+          " 
 
       # ── Paso 2: Gate SSVC + EPSS + CISA KEV ───────────────────────────────
       - name: Gate SSVC + EPSS + CISA KEV
