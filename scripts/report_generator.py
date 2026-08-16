@@ -9,14 +9,6 @@ import argparse
 import os
 from datetime import datetime
 
-try:
-    from iso27034 import generate_iso27034_report_section
-    ISO27034_AVAILABLE = True
-except ImportError:
-    ISO27034_AVAILABLE = False
-    def generate_iso27034_report_section(iso_result):
-        return ""
-
 SEVERITY_ICONS = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢", "INFO": "⚪"}
 DECISION_ICONS = {"PASS": "✅", "FAIL": "❌", "CONDITIONAL": "⚠️"}
 COVERAGE_ICONS = {"buena": "✅", "parcial": "🟡", "ninguna": "❌"}
@@ -38,13 +30,10 @@ TOOL_META = {
         "type":     "Análisis de Componentes de Software",
         "icon":     "🔬",
         "dedup_reason": (
-            "Juice Shop instala dependencias en múltiples subdirectorios de "
-            "`node_modules` (por ejemplo, `express-jwt/node_modules/lodash` y "
-            "`sanitize-html/node_modules/lodash`). La misma CVE sobre el mismo "
-            "paquete y versión aparece una vez por ruta, pero tras deduplicar "
-            "por `CVE + paquete + target` queda una sola entrada. "
-            "Los hallazgos removidos no son falsos positivos sino instancias "
-            "duplicadas de la misma vulnerabilidad real."
+            "La misma CVE sobre el mismo paquete y versión puede aparecer una vez por "
+            "ruta de instalación, pero tras deduplicar por `CVE + paquete + target` "
+            "queda una sola entrada. Los hallazgos removidos no son falsos positivos "
+            "sino instancias duplicadas de la misma vulnerabilidad real."
         ),
     },
     "zap": {
@@ -107,6 +96,10 @@ def section_header(findings_data, ai_eval_data, gate_data):
     tokens         = ai_eval_data.get("tokens_used", {})
     evaluation     = ai_eval_data.get("evaluation", {})
 
+    # FIX: ya no depende de un módulo externo iso27034.py; refleja si el
+    # bloque de trazabilidad real (asc_id / ASCs ejecutados) está presente.
+    iso_traza_ok = bool(gate_data.get("iso27034_traceability"))
+
     return f"""# 🔐 Reporte de Seguridad DevSecOps
 ## {decision_icon} Decisión de Despliegue: **{final_decision}**
 
@@ -124,7 +117,7 @@ def section_header(findings_data, ai_eval_data, gate_data):
 | **Modelo IA** | `{ai_model}` |
 | **Tokens utilizados** | `{tokens.get('total', 0):,}` (prompt: {tokens.get('prompt',0):,} / completion: {tokens.get('completion',0):,}) |
 | **Versión del prompt** | `{ai_eval_data.get('prompt_version', '2.0')}` |
-| **ISO/IEC 27034** | `{'✅ Activo' if ISO27034_AVAILABLE else '⚠️ Módulo no disponible'}` |
+| **ISO/IEC 27034** | `{'✅ Trazabilidad activa (asc_id)' if iso_traza_ok else '⚠️ Sin datos de trazabilidad en esta corrida'}` |
 
 ---
 
@@ -146,15 +139,18 @@ def section_gate(gate_data, ai_eval_data):
     risk_level     = evaluation.get("risk_level", "N/A")
     fp_estimate    = evaluation.get("false_positive_estimate", "N/A")
 
-    # ISO 27034
-    iso            = gate_data.get("iso27034_evaluation", {})
-    iso_tlot       = iso.get("tlot", {}).get("tlot_score", "N/A")
-    iso_alot       = iso.get("alot", {}).get("alot_score", "N/A")
-    iso_compliant  = gate_data.get("iso27034_compliant", False)
-    iso_label      = iso.get("iso_label", "No evaluado")
-
-    iso_tlot_str  = f"`{iso_tlot:.3f}`" if isinstance(iso_tlot, float) else f"`{iso_tlot}`"
-    iso_alot_str  = f"`{iso_alot:.3f}`" if isinstance(iso_alot, float) else f"`{iso_alot}`"
+    # FIX: se elimina la referencia a TLOT/ALOT (modelo descartado, ver
+    # ver seccion 4.6.3 de la tesis). En su lugar se resume la trazabilidad real de
+    # ISO/IEC 27034 (ASCs obligatorios vs. ejecutados), calculada a partir
+    # de iso27034_traceability.asc_breakdown.
+    tra       = gate_data.get("iso27034_traceability", {})
+    breakdown = tra.get("asc_breakdown", [])
+    required  = [b for b in breakdown if b.get("required")]
+    executed_req = [b for b in required if b.get("status") == "executed"]
+    if breakdown:
+        iso_line = f"`{len(executed_req)}/{len(required)}` ASC obligatorios ejecutados (ver sección de trazabilidad)"
+    else:
+        iso_line = "Sin datos de trazabilidad para esta corrida"
 
     md = f"""---
 
@@ -168,9 +164,7 @@ def section_gate(gate_data, ai_eval_data):
 | **Risk Score (IA)** | `{risk_score:.1f} / 10.0` |
 | **Confianza IA** | `{confidence:.0%}` |
 | **Falsos positivos estimados** | `{fp_estimate}` |
-| **ISO/IEC 27034 — TLOT** | {iso_tlot_str} |
-| **ISO/IEC 27034 — ALOT** | {iso_alot_str} |
-| **ISO/IEC 27034 — Conformidad** | {'✅ Conforme' if iso_compliant else '❌ No conforme'} — {iso_label} |
+| **ISO/IEC 27034 — Trazabilidad ANF** | {iso_line} |
 
 """
     conditions = gate_data.get("conditions_to_deploy", evaluation.get("conditions", []))
@@ -729,39 +723,31 @@ def section_ssvc_enrichment(ai_eval_data: dict) -> str:
 
 def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
     """
-    Comparación de los TRES gates: tradicional, IA e ISO/IEC 27034.
+    Comparación de los TRES gates: tradicional, IA y SSVC+EPSS+KEV.
     Esta es la contribución académica central del TG.
+    FIX: se elimina la variable muerta que calculaba iso_decision/iso_tlot/
+    iso_alot (nunca se imprimían y correspondían al modelo TLOT/ALOT
+    descartado). ISO/IEC 27034 se referencia solo como trazabilidad, con
+    remisión a la sección dedicada de asc_id / ASCs ejecutados.
     """
     trad       = gate_comparison.get("traditional", {})
     ai         = gate_comparison.get("ai_assisted", {})
     analysis   = gate_comparison.get("analysis", {})
     evaluation = ai_eval_data.get("evaluation", {})
-    iso        = gate_data.get("iso27034_evaluation", {})
 
     trad_decision = trad.get("decision", "UNKNOWN")
     ai_decision   = ai.get("decision", "UNKNOWN")
-    iso_decision  = iso.get("decision", "N/A")
 
     trad_icon = DECISION_ICONS.get(trad_decision, "❓")
     ai_icon   = DECISION_ICONS.get(ai_decision, "❓")
-    iso_icon  = DECISION_ICONS.get(iso_decision, "❓")
-
-    iso_tlot = iso.get("tlot", {}).get("tlot_score", 0)
-    iso_alot = iso.get("alot", {}).get("alot_score", 0)
-    iso_gap  = iso.get("gap_pct", 0)
-
-    iso_tlot_str = f"`{iso_tlot:.3f}`" if isinstance(iso_tlot, float) else "`N/A`"
-    iso_alot_str = f"`{iso_alot:.3f}`" if isinstance(iso_alot, float) else "`N/A`"
 
     trad_reasons = "\n".join(f"- {r}" for r in trad.get("reasons", []))
-    iso_reasoning = iso.get("reasoning", "No evaluado")
 
     # SSVC data
     ssvc      = gate_comparison.get("ssvc", {})
     ssvc_dec  = ssvc.get("decision", "N/A")
     ssvc_agg  = ssvc.get("aggregate_action", "N/A")
     ssvc_icon = DECISION_ICONS.get(ssvc_dec, "❓")
-    ac        = ssvc.get("action_counts", {})
     f1m       = ssvc.get("f1_metrics", {})
     f1_str    = f"`{f1m.get('f1_score',0):.3f}`" if f1m.get("cves_evaluated",0)>0 else "N/A"
 
@@ -778,7 +764,8 @@ def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
 > **Contribución central del Trabajo de Grado:** comparar empíricamente tres mecanismos de
 > decisión de despliegue. El gate tradicional como línea base, el gate IA para análisis
 > contextual, y el gate SSVC+EPSS+KEV como métrica estandarizada con F1 formal.
-> ISO/IEC 27034 se conserva para trazabilidad normativa (asc_id).
+> ISO/IEC 27034 se conserva para trazabilidad normativa (asc_id) — ver sección dedicada
+> más adelante en este reporte, no como un cuarto gate de decisión.
 
 | Criterio | Gate Tradicional | Gate con IA | Gate SSVC+EPSS+KEV |
 |---|---|---|---|
@@ -820,21 +807,89 @@ def section_gate_comparison(gate_comparison, ai_eval_data, gate_data):
 
 def section_iso27034(gate_data):
     """
-    Sección de conformidad normativa ISO/IEC 27034.
-    Generada por iso27034.py si está disponible.
+    FIX COMPLETO: Sección de trazabilidad normativa ISO/IEC 27034.
+
+    Reemplaza por completo la versión anterior, que dependía de un módulo
+    externo `iso27034.py` (import opcional) y de un bloque `iso27034_evaluation`
+    con TLOT/ALOT que ya no existe en gate_decision.json. Ahora se lee
+    directamente `gate_data["iso27034_traceability"]`, que documenta la norma
+    en los TRES puntos del pipeline (detector -> ANF y ASCs obligatorios,
+    normalizador -> asc_id por hallazgo, gate/reporte -> ASCs ejecutados vs.
+    requeridos), consistente con la tesis, seccion 4.6.4 y con la respuesta a la
+    observación de la segunda evaluación sobre TLOT/ALOT.
     """
-    iso_result = gate_data.get("iso27034_evaluation", {})
-    if not iso_result:
-        return ""
-    if not ISO27034_AVAILABLE:
+    tra = gate_data.get("iso27034_traceability", {})
+    if not tra:
         return """---
 
-## 📋 Trazabilidad Normativa ISO/IEC 27034 (ASC Coverage)
+## 📋 Trazabilidad Normativa ISO/IEC 27034
 
-> ⚠️ El módulo `iso27034.py` no está disponible. Instálalo en `scripts/` para activar la validación normativa.
+> ⚠️ No se encontró el bloque `iso27034_traceability` en `gate_decision.json` para esta
+> corrida. Verifica que el detector haya generado el bloque ANF en `scan_config.json`
+> y que el gate lo esté propagando al reporte final.
 
 """
-    return generate_iso27034_report_section(iso_result)
+
+    executed  = tra.get("ascs_executed", [])
+    breakdown = tra.get("asc_breakdown", [])
+    required  = [b.get("asc_id") for b in breakdown if b.get("required")]
+
+    rows = ""
+    for b in breakdown:
+        asc         = b.get("asc_id", "?")
+        req_label   = "✅ Obligatorio" if b.get("required") else "⚪ Opcional"
+        status      = b.get("status", "?")
+        status_icon = "✅ Ejecutado" if status == "executed" else "⚠️ No ejecutado"
+        rows += f"| `{asc}` | {req_label} | {status_icon} |\n"
+
+    if not rows:
+        rows = "| — | — | Sin desglose de ASC disponible para esta corrida |\n"
+
+    gap = [b.get("asc_id") for b in breakdown
+           if b.get("required") and b.get("status") != "executed"]
+    if gap:
+        gap_block = (
+            "### ⚠️ Brechas de cobertura detectadas\n\n"
+            "Los siguientes ASC eran obligatorios según el ANF (definido por la criticidad "
+            "declarada del servicio) pero no se ejecutaron o no reportaron hallazgos en "
+            "esta corrida:\n\n"
+            + "\n".join(f"- `{g}`" for g in gap) + "\n\n"
+        )
+    else:
+        gap_block = (
+            "✅ No se detectaron brechas: todos los ASC obligatorios según el ANF se "
+            "ejecutaron en esta corrida.\n\n"
+        )
+
+    return f"""---
+
+## 📋 Trazabilidad Normativa ISO/IEC 27034
+
+> La norma se materializa en **tres puntos operativos** del pipeline, no en un único
+> campo aislado:
+>
+> 1. **Detector** (`scan_config.json`): define en el ANF (Application Normative
+>    Framework) qué ASC son obligatorios según la criticidad declarada del servicio.
+> 2. **Normalizador**: etiqueta cada hallazgo individual con el `asc_id` del control
+>    que lo detectó.
+> 3. **Este gate/reporte**: registra qué ASC se ejecutaron realmente frente a los
+>    requeridos por el ANF, permitiendo auditar brechas de cobertura.
+>
+> El modelo TLOT/ALOT usado en versiones anteriores del pipeline fue **reemplazado**
+> por el gate SSVC + EPSS + CISA KEV (sección anterior) porque dependía de constantes
+> numéricas no prescritas por la norma. ISO/IEC 27034 se mantiene como marco de
+> **trazabilidad**, no como mecanismo de puntuación — ver seccion 4.6.3-4.6.4 de la tesis.
+
+### ASCs ejecutados frente a los requeridos por el ANF
+
+| ASC | Obligatorio (ANF) | Estado en esta corrida |
+|---|---|---|
+{rows}
+
+{gap_block}
+**ASCs ejecutados en total:** `{', '.join(executed) if executed else 'ninguno registrado'}`
+
+"""
 
 
 def section_findings_detail(findings, tools_executed):
@@ -930,7 +985,16 @@ def section_findings_detail(findings, tools_executed):
     return md
 
 
-def section_academic(timestamp, pipeline_run, attack_chains, tools):
+def section_academic(timestamp, pipeline_run, attack_chains, tools, service="este servicio"):
+    """
+    FIX: se elimina toda referencia a TLOT/ALOT (tabla de marco normativo y
+    tabla de capacidades diferenciales) y se corrige el conteo hardcodeado
+    de "n=2 casos de estudio" (Juice Shop/FitFusion), que quedó de una de las
+    primeras corridas y ya no refleja el alcance real de la validación (9
+    casos, ver tesis seccion 5). La tabla de capacidades ahora compara los TRES
+    gates reales (Tradicional / IA / SSVC+EPSS+KEV), consistente con la
+    sección de comparación de gates más arriba en este mismo reporte.
+    """
     chains = len(attack_chains)
     return f"""---
 
@@ -943,12 +1007,12 @@ Trabajo de Grado en la **Universidad del Valle – Sede Tuluá**.
 
 | Estándar / Framework | Aplicación en este pipeline |
 |---|---|
-| **ISO/IEC 27034-1:2011** | Modelo TLOT/ALOT para la decisión de despliegue |
+| **ISO/IEC 27034-1:2011** | Trazabilidad normativa en tres puntos (detector / normalizador / gate) — ver sección dedicada |
 | **OWASP Top 10 (2021)** | Categorización de todos los hallazgos normalizados |
 | **CVSS v3.1 (NIST)** | Puntuación de severidad para hallazgos de Trivy |
 | **CWE/SANS Top 25** | Clasificación de debilidades en SAST y DAST |
 | **MITRE ATT&CK** | Referencia para cadenas de ataque identificadas por la IA |
-| **ISO/IEC 27005:2022** | Base para la calibración de niveles TLOT por criticidad |
+| **SSVC v2.1 (CISA/SEI-CERT)** | Árbol de decisión del tercer gate, con EPSS y CISA KEV |
 
 ### Herramientas integradas en el pipeline
 
@@ -961,22 +1025,25 @@ Trabajo de Grado en la **Universidad del Valle – Sede Tuluá**.
 
 ### Contribución diferencial por tipo de gate
 
-| Capacidad | Gate Tradicional | Gate con IA | Gate ISO/IEC 27034 |
+| Capacidad | Gate Tradicional | Gate con IA | Gate SSVC+EPSS+KEV |
 |---|---|---|---|
-| Detección de falsos positivos | ❌ | ✅ | ❌ |
-| Análisis de explotabilidad real | ❌ | ✅ | ❌ |
+| Detección de falsos positivos | ❌ | ✅ | ✅ |
+| Análisis de explotabilidad real | ❌ | ✅ | ✅ |
 | Cadenas de ataque ({chains} en este run) | ❌ | ✅ | ❌ |
 | Blind spots de cobertura | ❌ | ✅ | ❌ |
-| Fundamento normativo trazable | ❌ | ❌ | ✅ |
-| Modelo de confianza (TLOT/ALOT) | ❌ | ❌ | ✅ |
+| Métricas formales (F1 vs. CISA KEV) | ❌ | ❌ | ✅ |
+| Trazabilidad normativa ISO/IEC 27034 | ❌ | ❌ | ✅ (vía asc_id, ver sección dedicada) |
 | Impacto de negocio | ❌ | ✅ | ❌ |
 
 ### Limitaciones del estudio
 
-- Pipeline validado sobre OWASP Juice Shop y FitFusion Backend (n=2 casos de estudio)
-- Los valores TLOT son una interpretación cuantitativa propia de la norma, no valores prescritos por ISO/IEC 27034-1:2011
-- La evaluación IA requiere validación humana para decisiones en producción
-- No reemplaza una auditoría de seguridad formal ni un pentest manual
+- Este reporte corresponde a una única corrida del pipeline sobre `{service}`; la
+  validación completa del mecanismo abarca nueve casos de estudio documentados en la
+  tesis (Capítulo 5), incluyendo dos casos adicionales de validación dirigida (seccion 5.6).
+- La evaluación IA requiere validación humana para decisiones en producción.
+- No reemplaza una auditoría de seguridad formal ni un pentest manual.
+- El gate SSVC prioriza deliberadamente la cautela ante hallazgos críticos con
+  evidencia mínima de explotabilidad (ver discusión en la tesis, seccion 5.6.3).
 
 ---
 
@@ -1013,6 +1080,7 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     attack_chains   = evaluation.get("attack_chains", [])
     timestamp       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     pipeline_run    = findings_data.get("pipeline_run", "local")
+    service_name    = findings_data.get("service", "este servicio")
     by_tool_dedup   = summary.get("by_tool", {})
 
     report  = ""
@@ -1029,7 +1097,7 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     report += section_gate_comparison(gate_comparison, ai_eval_data, gate_data)
     report += section_iso27034(gate_data)
     report += section_findings_detail(findings, tools_executed)
-    report += section_academic(timestamp, pipeline_run, attack_chains, by_tool_dedup)
+    report += section_academic(timestamp, pipeline_run, attack_chains, by_tool_dedup, service_name)
 
     os.makedirs(
         os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
@@ -1049,7 +1117,10 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     print(f"  📊 SSVC F1        : {ssvc_f1}")
     enrichment_used = ai_eval_data.get("ssvc_enrichment", {}).get("used", False)
     print(f"  🔬 IA híbrida SSVC: {'Sí - enriquecida con EPSS/KEV' if enrichment_used else 'No (ssvc_gate no disponible)'}")
-    print(f"  📋 ISO/IEC 27034  : trazabilidad normativa (ASC coverage)")
+    tra = gate_data.get("iso27034_traceability", {})
+    n_req = len([b for b in tra.get("asc_breakdown", []) if b.get("required")])
+    n_exec_req = len([b for b in tra.get("asc_breakdown", []) if b.get("required") and b.get("status") == "executed"])
+    print(f"  📋 ISO/IEC 27034  : trazabilidad normativa — {n_exec_req}/{n_req} ASC obligatorios ejecutados")
     print(f"  📊 Hallazgos      : {total_findings} únicos de {sum(tools_executed.values())} raw")
     print("="*60 + "\n")
 
