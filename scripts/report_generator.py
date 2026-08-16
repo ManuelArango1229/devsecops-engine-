@@ -99,24 +99,56 @@ def build_iso27034_traceability(scan_config, findings_list, tools_executed=None)
     if tools_executed is None:
         tools_executed = {}
 
+    # Leer definiciones de ASC del scan_config — admite dos formatos:
+    # Formato A (nuevo detector): asc_definitions[].{asc_id, mandatory}
+    # Formato B (legacy):         iso27034_anf.required_ascs
+    asc_defs     = scan_config.get("asc_definitions", [])
     anf          = scan_config.get("iso27034_anf", {})
-    required_ids = anf.get("required_ascs", [])
-    optional_ids = anf.get("optional_ascs", [])
 
-    # Siempre usar los 4 ASCs canónicos como base mínima
-    if not required_ids:
-        required_ids = list(ASC_CATALOG.keys())
+    if asc_defs:
+        # Formato A: usar las definiciones del detector
+        required_ids = [d["asc_id"] for d in asc_defs if d.get("mandatory", False)]
+        optional_ids = [d["asc_id"] for d in asc_defs if not d.get("mandatory", False)]
+        # Actualizar ASC_CATALOG con metadata del detector si está disponible
+        for d in asc_defs:
+            if d["asc_id"] not in ASC_CATALOG:
+                ASC_CATALOG[d["asc_id"]] = (d.get("tool", ""), d.get("name", ""))
+    else:
+        # Formato B legacy o sin scan_config — usar los 4 canónicos
+        required_ids = anf.get("required_ascs", list(ASC_CATALOG.keys()))
+        # Si son nombres de herramienta en vez de ASC IDs, mapear
+        tool_to_asc = {v[0].lower().split()[0]: k for k, v in ASC_CATALOG.items()}
+        required_ids = [
+            tool_to_asc.get(r.lower(), r) if not r.startswith("ASC-") else r
+            for r in required_ids
+        ]
+        optional_ids = []
 
-    all_asc_ids  = required_ids + [a for a in optional_ids if a not in required_ids]
+    # Siempre incluir los 4 ASCs canónicos como mínimo
+    for asc in ASC_CATALOG:
+        if asc not in required_ids and asc not in optional_ids:
+            optional_ids.append(asc)
+
+    all_asc_ids = required_ids + [a for a in optional_ids if a not in required_ids]
 
     # ASCs con findings directos
     executed_by_findings = {f.get("asc_id") for f in findings_list if f.get("asc_id")}
 
     # ASCs cuya herramienta procesó resultados (aunque sean 0 findings)
+    # tools_executed tiene la clave si el normalizer procesó ese tool
     executed_by_tool = {
         asc for asc, tool_key in ASC_TO_TOOL_KEY.items()
-        if tool_key in tools_executed  # clave presente = herramienta procesada
+        if tool_key in tools_executed
     }
+
+    # También mapear desde asc_definitions si el detector usó nombres de herramienta
+    asc_defs_local = scan_config.get("asc_definitions", [])
+    for d in asc_defs_local:
+        asc_id   = d.get("asc_id", "")
+        tool_name = d.get("tool", "").lower()
+        # semgrep→semgrep, trivy→trivy, zap→zap, nuclei→nuclei
+        if tool_name in tools_executed and asc_id:
+            executed_by_tool.add(asc_id)
 
     executed_set = executed_by_findings | executed_by_tool
 
@@ -1168,7 +1200,7 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     # ── Construir trazabilidad ISO/IEC 27034 ──────────────────────────────────
     # gate.py no escribe este bloque; lo calculamos aquí desde scan_config.json
     # y findings.json, que sí contienen los datos necesarios (asc_id, iso27034_anf).
-    if not gate_data.get("iso27034_traceability"):
+    if True:  # Siempre reconstruir — gate.py usa asc_id en findings (falla con 0 findings)
         scan_cfg = {}
         if scan_config_path and os.path.exists(scan_config_path):
             try:
