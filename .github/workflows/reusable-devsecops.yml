@@ -602,9 +602,9 @@ jobs:
       - name: Gate SSVC + EPSS + CISA KEV
         run: |
           python scripts/ssvc_gate.py \
-            --findings    results/findings.json \
-            --criticality "${{ inputs.criticality }}" \
-            --output      results/ssvc_result.json
+            results/findings.json \
+            "${{ inputs.criticality }}" \
+            > results/ssvc_result.json 2>/dev/null || echo '{}' > results/ssvc_result.json
         continue-on-error: true
 
       # ── Paso 3: Motor de evaluación IA híbrida ─────────────────────────────

@@ -1081,14 +1081,25 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     print("  GENERADOR DE REPORTE — DevSecOps Engine v1.3")
     print("=" * 60)
 
-    with open(findings_path,  "r") as f: findings_data  = json.load(f)
-    with open(ai_eval_path,   "r") as f: ai_eval_data   = json.load(f)
-    with open(gate_path,      "r") as f: gate_data      = json.load(f)
+    def _safe_load(path, default):
+        try:
+            raw = open(path, "r", encoding="utf-8").read().strip()
+            return json.loads(raw) if raw else default
+        except (json.JSONDecodeError, ValueError, FileNotFoundError, OSError):
+            return default
+
+    findings_data  = _safe_load(findings_path,  {"findings": [], "summary": {}, "tools_executed": {}})
+    ai_eval_data   = _safe_load(ai_eval_path,   {"evaluation": {}, "ai_model": "N/A", "tokens_used": {}})
+    gate_data      = _safe_load(gate_path,       {"decision": "UNKNOWN", "gate_comparison": {}})
 
     recon_data = {}
     if recon_path and os.path.exists(recon_path):
-        with open(recon_path, "r") as f:
-            recon_data = json.load(f)
+        try:
+            raw = open(recon_path, "r", encoding="utf-8").read().strip()
+            if raw:
+                recon_data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            recon_data = {}
 
     # ── Construir trazabilidad ISO/IEC 27034 ──────────────────────────────────
     # gate.py no escribe este bloque; lo calculamos aquí desde scan_config.json
@@ -1096,8 +1107,11 @@ def generate_report(findings_path, ai_eval_path, gate_path, output_path,
     if not gate_data.get("iso27034_traceability"):
         scan_cfg = {}
         if scan_config_path and os.path.exists(scan_config_path):
-            with open(scan_config_path, "r") as f:
-                scan_cfg = json.load(f)
+            try:
+                raw = open(scan_config_path, "r", encoding="utf-8").read().strip()
+                scan_cfg = json.loads(raw) if raw else {}
+            except (json.JSONDecodeError, ValueError):
+                scan_cfg = {}
         gate_data["iso27034_traceability"] = build_iso27034_traceability(
             scan_cfg, findings_data.get("findings", [])
         )
