@@ -75,15 +75,6 @@ on:
         required: false
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PERMISOS GLOBALES
-# ─────────────────────────────────────────────────────────────────────────────
-permissions:
-  contents:  read
-  packages:  read
-  actions:   read
-  security-events: write
-
-# ─────────────────────────────────────────────────────────────────────────────
 # JOBS
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -251,8 +242,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: detector
     outputs:
-      app_url:    ${{ steps.recon.outputs.app_url }}
-      app_alive:  ${{ steps.recon.outputs.app_alive }}
+      app_url:   ${{ steps.recon.outputs.app_url }}
+      app_alive: ${{ steps.recon.outputs.app_alive }}
 
     steps:
       - name: Checkout engine
@@ -302,7 +293,6 @@ jobs:
             --target-port "${{ inputs.target_port }}" \
             --output      results/recon_context.json || true
 
-          # Health check
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL" 2>/dev/null || echo "000")
           if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
             echo "app_alive=true"  >> $GITHUB_OUTPUT
@@ -431,9 +421,10 @@ jobs:
           path: results/nuclei_results.json
 
   # ───────────────────────────────────────────────────────────────────────────
-  # JOB 6: Evaluación — Normalización + Gate IA Híbrido + SSVC + Reporte
-  # Este job siempre se ejecuta (if: always()) para garantizar el reporte
-  # aunque alguna herramienta falle parcialmente.
+  # JOB 6: Evaluación
+  # Normalización + Gate IA Híbrido + SSVC + ISO/IEC 27034 + Reporte
+  # Siempre se ejecuta (if: always()) para garantizar el reporte aunque
+  # alguna herramienta falle parcialmente.
   # ───────────────────────────────────────────────────────────────────────────
   evaluation:
     name: "Job 6 — Evaluación (Normalización + Gate IA + SSVC + ISO 27034)"
@@ -461,49 +452,43 @@ jobs:
       - name: Download scan_config
         uses: actions/download-artifact@v4
         with:
-          name:  scan-config
-          path:  results/
-          github-token: ${{ github.token }}
+          name: scan-config
+          path: results/
         continue-on-error: true
 
       - name: Download SAST results
         uses: actions/download-artifact@v4
         with:
-          name:  sast-results
-          path:  results/
-          github-token: ${{ github.token }}
+          name: sast-results
+          path: results/
         continue-on-error: true
 
       - name: Download SCA results
         uses: actions/download-artifact@v4
         with:
-          name:  sca-results
-          path:  results/
-          github-token: ${{ github.token }}
+          name: sca-results
+          path: results/
         continue-on-error: true
 
       - name: Download recon results
         uses: actions/download-artifact@v4
         with:
-          name:  recon-results
-          path:  results/
-          github-token: ${{ github.token }}
+          name: recon-results
+          path: results/
         continue-on-error: true
 
       - name: Download DAST results
         uses: actions/download-artifact@v4
         with:
-          name:  dast-results
-          path:  results/
-          github-token: ${{ github.token }}
+          name: dast-results
+          path: results/
         continue-on-error: true
 
       - name: Download pentest results
         uses: actions/download-artifact@v4
         with:
-          name:  pentest-results
-          path:  results/
-          github-token: ${{ github.token }}
+          name: pentest-results
+          path: results/
         continue-on-error: true
 
       # ── Crear archivos vacíos para herramientas que no ejecutaron ────────────
@@ -515,8 +500,9 @@ jobs:
           touch results/nuclei_results.json  2>/dev/null || true
           touch results/recon_context.json   2>/dev/null || true
           touch results/scan_config.json     2>/dev/null || true
-          # scan_config mínimo si el detector falló
-          python -c "
+
+          # scan_config mínimo con ANF si el detector falló
+          python3 -c "
           import json, os
           cfg_path = 'results/scan_config.json'
           if os.path.getsize(cfg_path) == 0:
@@ -527,25 +513,30 @@ jobs:
                   'environment': '${{ inputs.environment }}',
                   'scan_mode': 'image' if '${{ inputs.target_image }}' else 'url',
                   'iso27034_anf': {
-                      'required_ascs': ['ASC-SAST-001','ASC-SCA-001','ASC-DAST-001','ASC-PENTEST-001'],
+                      'required_ascs': [
+                          'ASC-SAST-001',
+                          'ASC-SCA-001',
+                          'ASC-DAST-001',
+                          'ASC-PENTEST-001'
+                      ],
                       'optional_ascs': []
                   }
-              }, open(cfg_path,'w'), indent=2)
+              }, open(cfg_path, 'w'), indent=2)
           " || true
 
       # ── Paso 1: Normalización y deduplicación ──────────────────────────────
       - name: Normalización de hallazgos
         run: |
           python scripts/normalizer.py \
-            --semgrep   results/semgrep_results.json \
-            --trivy     results/trivy_results.json \
-            --zap       results/zap_results.json \
-            --nuclei    results/nuclei_results.json \
+            --semgrep     results/semgrep_results.json \
+            --trivy       results/trivy_results.json \
+            --zap         results/zap_results.json \
+            --nuclei      results/nuclei_results.json \
             --scan-config results/scan_config.json \
-            --service   "${{ inputs.service_name }}" \
+            --service     "${{ inputs.service_name }}" \
             --criticality "${{ inputs.criticality }}" \
             --environment "${{ inputs.environment }}" \
-            --output    results/findings.json
+            --output      results/findings.json
 
       # ── Paso 2: Gate SSVC + EPSS + CISA KEV ───────────────────────────────
       - name: Gate SSVC + EPSS + CISA KEV
@@ -564,10 +555,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           python scripts/ai_engine.py \
-            --findings     results/findings.json \
-            --ssvc-result  results/ssvc_result.json \
-            --scan-config  results/scan_config.json \
-            --output       results/ai_evaluation.json
+            --findings    results/findings.json \
+            --ssvc-result results/ssvc_result.json \
+            --scan-config results/scan_config.json \
+            --output      results/ai_evaluation.json
 
       # ── Paso 4: Security Gate (consolidación 3 enfoques) ──────────────────
       - name: Security Gate (tradicional + IA + SSVC)
@@ -579,7 +570,7 @@ jobs:
             --criticality   "${{ inputs.criticality }}" \
             --output        results/gate_decision.json
 
-      # ── Paso 5: Generación del reporte con trazabilidad ISO/IEC 27034 ──────
+      # ── Paso 5: Reporte con trazabilidad ISO/IEC 27034 ────────────────────
       - name: Generar reporte SECURITY_REPORT.md
         run: |
           python scripts/report_generator.py \
@@ -604,19 +595,19 @@ jobs:
             results/gate_decision.json
             results/SECURITY_REPORT.md
 
-      # ── Mostrar decisión en el log del runner ─────────────────────────────
+      # ── Mostrar decisión en el log ─────────────────────────────────────────
       - name: Mostrar decisión de despliegue
         if: always()
         run: |
           echo "=================================================="
           echo "  DECISIÓN DEL SECURITY GATE"
           echo "=================================================="
-          python -c "
+          python3 -c "
           import json
           try:
               gate = json.load(open('results/gate_decision.json'))
-              dec  = gate.get('decision','UNKNOWN')
-              src  = gate.get('decision_source','N/A')
+              dec  = gate.get('decision', 'UNKNOWN')
+              src  = gate.get('decision_source', 'N/A')
               icon = {'PASS':'✅','FAIL':'❌','CONDITIONAL':'⚠️'}.get(dec,'❓')
               print(f'  {icon} Decisión:  {dec}')
               print(f'  📋 Fuente:    {src}')
@@ -628,17 +619,17 @@ jobs:
               tra  = gate.get('iso27034_traceability', {})
               bd   = tra.get('asc_breakdown', [])
               req  = [b for b in bd if b.get('required')]
-              exr  = [b for b in req if b.get('status')=='executed']
+              exr  = [b for b in req if b.get('status') == 'executed']
               print(f'  📋 ISO 27034: {len(exr)}/{len(req)} ASC obligatorios ejecutados')
           except Exception as e:
               print(f'  ⚠️  No se pudo leer gate_decision.json: {e}')
           " || true
           echo "=================================================="
 
-      # ── Forzar fallo del job si la decisión es FAIL ───────────────────────
+      # ── Forzar fallo si la decisión es FAIL ───────────────────────────────
       - name: Verificar decisión de despliegue
         run: |
-          DECISION=$(python -c "
+          DECISION=$(python3 -c "
           import json, sys
           try:
               d = json.load(open('results/gate_decision.json')).get('decision','UNKNOWN')
@@ -650,11 +641,11 @@ jobs:
           echo "Decisión: $DECISION"
 
           if [ "$DECISION" = "FAIL" ]; then
-            echo "❌ El Security Gate ha bloqueado el despliegue (FAIL)."
+            echo "❌ El Security Gate bloqueó el despliegue (FAIL)."
             echo "   Revisa SECURITY_REPORT.md en los artefactos para los detalles."
             exit 1
           elif [ "$DECISION" = "CONDITIONAL" ]; then
-            echo "⚠️  Despliegue CONDITIONAL — revisar SECURITY_REPORT.md antes de promover a producción."
+            echo "⚠️  CONDITIONAL — revisar SECURITY_REPORT.md antes de promover a producción."
           else
             echo "✅ PASS — El despliegue puede proceder."
           fi
