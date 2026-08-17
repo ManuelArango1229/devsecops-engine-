@@ -141,8 +141,10 @@ jobs:
           json.dump(cfg, open('results/scan_config.json','w'), indent=2)
           " 
 
-          echo "language=$(python -c "import json; print(json.load(open('results/scan_config.json'))['language'])")" >> $GITHUB_OUTPUT
-          echo "scan_mode=$(python -c "import json; print(json.load(open('results/scan_config.json'))['scan_mode'])")" >> $GITHUB_OUTPUT
+          _LANG=$(python3 -c "import json; v=json.load(open('results/scan_config.json')).get('language','auto'); print(v.get('primary','auto') if isinstance(v,dict) else v)")
+          echo "language=$_LANG" >> $GITHUB_OUTPUT
+          _MODE=$(python3 -c "import json; v=json.load(open('results/scan_config.json')).get('scan_mode','unknown'); print(v.get('mode','unknown') if isinstance(v,dict) else v)")
+          echo "scan_mode=$_MODE"  >> $GITHUB_OUTPUT
           echo "has_openapi=$(python -c "import json; cfg=json.load(open('results/scan_config.json')); print(str(bool(cfg.get('openapi_spec'))).lower())")" >> $GITHUB_OUTPUT
 
       - name: Asegurar scan_config.json válido
@@ -201,7 +203,13 @@ jobs:
 
       - name: Run Semgrep
         run: |
-          LANG="${{ needs.detector.outputs.language }}"
+          # El detector emite language como dict; extraer solo el valor de 'primary'
+          RAW="${{ needs.detector.outputs.language }}"
+          if echo "$RAW" | grep -q "'primary'"; then
+            LANG=$(echo "$RAW" | grep -o "'primary': '[^']*'" | grep -o "'[^']*'$" | tr -d "'")
+          else
+            LANG="$RAW"
+          fi
           RULES="p/generic"
           case "$LANG" in
             nodejs|javascript) RULES="p/nodejs p/javascript" ;;
@@ -211,6 +219,7 @@ jobs:
             golang)            RULES="p/golang" ;;
             csharp)            RULES="p/csharp" ;;
           esac
+          echo "Lenguaje: $LANG | Reglas: $RULES" 
 
           TARGET="."
           if [ -d "source_repo" ]; then TARGET="source_repo"; fi
@@ -419,7 +428,6 @@ jobs:
         run: |
           APP_URL="${{ needs.recon.outputs.app_url }}"
           mkdir -p results zap_output
-          chmod 777 zap_output
           docker run --rm \
             --network host \
             -v $(pwd)/zap_output:/zap/wrk:rw \
@@ -496,20 +504,18 @@ jobs:
       - name: Run Nuclei
         run: |
           APP_URL="${{ needs.recon.outputs.app_url }}"
-          mkdir -p results
-          echo '[]' > results/nuclei_results.json
           nuclei \
             -u "$APP_URL" \
             -severity critical,high,medium \
-            -j \
+            -json \
             -o results/nuclei_results.json \
-            -timeout 10 2>/dev/null || true
+            -timeout 10 || true
 
       - name: Asegurar nuclei_results.json válido
         if: always()
         run: |
           mkdir -p results
-          [ -s results/nuclei_results.json ] || echo '[]' > results/nuclei_results.json
+            echo '[]' > results/nuclei_results.json
 
       - name: Upload pentest results
         uses: actions/upload-artifact@v4
