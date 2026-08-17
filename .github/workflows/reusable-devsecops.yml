@@ -264,9 +264,18 @@ jobs:
 
           echo "Usando reglas: $RULES | Path: $SCAN_PATH"
 
+          # Semgrep necesita un --config por cada ruleset; si se pasa
+          # "p/nodejs p/javascript" como un solo string, el segundo valor
+          # se interpreta como scanning root en vez de config y falla con
+          # "Invalid scanning root: p/javascript".
+          CONFIG_ARGS=()
+          for r in $RULES; do
+            CONFIG_ARGS+=(--config "$r")
+          done
+
           set +e
           semgrep \
-            --config $RULES \
+            "${CONFIG_ARGS[@]}" \
             --json \
             --output results/semgrep_results.json \
             --timeout 300 \
