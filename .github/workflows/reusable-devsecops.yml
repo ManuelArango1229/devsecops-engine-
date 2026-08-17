@@ -234,7 +234,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-          [ -s results/semgrep_results.json ] || echo '{"results":[],"errors":[]}' > results/semgrep_results.json
+            echo '{"results":[],"errors":[]}' > results/semgrep_results.json
 
       - name: Upload SAST results
         uses: actions/upload-artifact@v4
@@ -295,7 +295,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-          [ -s results/trivy_results.json ] || echo '{"Results":[]}' > results/trivy_results.json
+            echo '{"Results":[]}' > results/trivy_results.json
 
       - name: Upload SCA results
         uses: actions/upload-artifact@v4
@@ -361,9 +361,8 @@ jobs:
           fi
 
           python scripts/recon.py \
-            --target-url  "$APP_URL" \
-            --target-port "${{ inputs.target_port }}" \
-            --output      results/recon_context.json || true
+            --target "$APP_URL" \
+            --output results/recon_context.json || true
 
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL" 2>/dev/null || echo "000")
           if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
@@ -377,7 +376,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-          [ -s results/recon_context.json ] || echo '{"target_url":"","host":"","port":"","summary":{}}' > results/recon_context.json
+            echo '{"target_url":"","host":"","port":"","summary":{}}' > results/recon_context.json
 
       - name: Upload recon results
         uses: actions/upload-artifact@v4
@@ -515,7 +514,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-          [ -s results/nuclei_results.json ] || echo '[]' > results/nuclei_results.json
+            echo '[]' > results/nuclei_results.json
 
       - name: Upload pentest results
         uses: actions/upload-artifact@v4
