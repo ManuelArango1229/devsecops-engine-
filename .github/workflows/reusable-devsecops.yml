@@ -1,14 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# DevSecOps Engine — Pipeline Reutilizable (FUSIÓN)
-# Trabajo de Grado — Universidad del Valle 2026
-# Jhojan Stiven Castaño Jejen & Juan Manuel Arango Rodas
-#
-# Jobs 0-5: lógica verificada del pipeline estable (v2) — guardias, argumentos
-#           de scripts y herramientas de recon confirmados contra los scripts
-#           reales del repo.
-# Job 6:    tomado de la versión en curso — motor SSVC + trazabilidad ISO/IEC
-#           27034 (asc_id) + gate de despliegue, no presente en la v2 vieja.
-# ─────────────────────────────────────────────────────────────────────────────
+
 name: DevSecOps Engine — Pipeline Reutilizable
 
 on:
