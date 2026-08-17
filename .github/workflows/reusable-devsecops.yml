@@ -234,7 +234,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-            echo '{"results":[],"errors":[]}' > results/semgrep_results.json
+          [ -s results/semgrep_results.json ] || echo '{"results":[],"errors":[]}' > results/semgrep_results.json
 
       - name: Upload SAST results
         uses: actions/upload-artifact@v4
@@ -295,7 +295,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-            echo '{"Results":[]}' > results/trivy_results.json
+          [ -s results/trivy_results.json ] || echo '{"Results":[]}' > results/trivy_results.json
 
       - name: Upload SCA results
         uses: actions/upload-artifact@v4
@@ -377,7 +377,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-            echo '{"target_url":"","host":"","port":"","summary":{}}' > results/recon_context.json
+          [ -s results/recon_context.json ] || echo '{"target_url":"","host":"","port":"","summary":{}}' > results/recon_context.json
 
       - name: Upload recon results
         uses: actions/upload-artifact@v4
@@ -515,7 +515,7 @@ jobs:
         if: always()
         run: |
           mkdir -p results
-            echo '[]' > results/nuclei_results.json
+          [ -s results/nuclei_results.json ] || echo '[]' > results/nuclei_results.json
 
       - name: Upload pentest results
         uses: actions/upload-artifact@v4
